@@ -47,6 +47,17 @@ def create_app(config=Config('config.yaml')):
     app.config.update(config.get_flask_dict())
     app.config['WEBPACK_MANIFEST_PATH'] = 'manifest.json'
 
+    csp = { 'default-src': '\'self\'' }
+    media_servers = [ '\'self\'' ]
+    for url in [config.storage.thumbnails.url, config.storage.uploads.url]:
+        if url not in media_servers:
+            media_servers.append(url)
+    csp['img-src'] = media_servers
+    csp['media-src'] = media_servers
+    talisman.init_app(app,
+                      content_security_policy=csp,
+                      content_security_policy_nonce_in=['style_src'])
+
     babel.init_app(app)
     jwt.init_app(app)
     webpack.init_app(app)
@@ -57,8 +68,6 @@ def create_app(config=Config('config.yaml')):
     db_init_app(app)
     re_amention.init_app(app)
     engine_init_app(app)
-    talisman.init_app(app,
-                      content_security_policy_nonce_in=['style_src'])
     # app.wsgi_app = ProfilerMiddleware(app.wsgi_app)
 
     app.register_blueprint(home)
@@ -79,7 +88,7 @@ def create_app(config=Config('config.yaml')):
                                'url_for': url_for, 'asset_url_for': webpack.asset_url_for, 'func': misc,
                                'form': forms, 'hostname': socket.gethostname(), 'datetime': datetime,
                                'e': escape_html, 'markdown': misc.our_markdown, '_': _, 'get_locale': get_locale,
-                               'BeautifulSoup': BeautifulSoup})
+                               'BeautifulSoup': BeautifulSoup, 'csp_nonce': app.jinja_env.globals['csp_nonce']})
 
     if config.app.development:
         import logging
