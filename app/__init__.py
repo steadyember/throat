@@ -57,7 +57,8 @@ def create_app(config=Config('config.yaml')):
     db_init_app(app)
     re_amention.init_app(app)
     engine_init_app(app)
-    talisman.init_app(app)
+    talisman.init_app(app,
+                      content_security_policy_nonce_in=['style_src'])
     # app.wsgi_app = ProfilerMiddleware(app.wsgi_app)
 
     app.register_blueprint(home)
