@@ -453,6 +453,16 @@ if (document.getElementById("throat_chat")) {
   window.chat = "true";
 }
 
+if (document.getElementById("throat_pagefoot_labrat")) {
+  window.labrat = true;
+  window.blocked = document.getElementById("throat_pagefoot_blocked");
+  if (window.blocked) {
+    window.nposts = '/all/new';
+  }
+  window.moreuri = document.getElementById("throat_pagefoot_moreuri");
+}
+
+
 window.onbeforeunload = function (e) {
   var flag = false;
 
