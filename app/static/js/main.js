@@ -449,6 +449,9 @@ new Konami(function() {
     document.querySelector('#toggledark span').innerHTML = icons.sun;
 });
 
+if (document.getElementById("throat_chat")) {
+  window.chat = "true";
+}
 
 window.onbeforeunload = function (e) {
   var flag = false;
