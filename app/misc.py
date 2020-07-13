@@ -1199,10 +1199,10 @@ def upload_file(max_size=16777216):
         extension = '.png'
     elif mtype == 'image/gif':
         extension = '.gif'
-    elif mtype == 'video/mp4':
-        extension = '.mp4'
-    elif mtype == 'video/webm':
-        extension = '.webm'
+    # elif mtype == 'video/mp4':
+    #     extension = '.mp4'
+    # elif mtype == 'video/webm':
+    #     extension = '.webm'
     else:
         return _("File type not allowed"), False
     ufile.seek(0)
