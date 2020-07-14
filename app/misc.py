@@ -6,16 +6,11 @@ import base64
 import uuid
 import random
 import time
-import magic
 import os
 import hashlib
 import re
 import gevent
-import gi
 
-from mutagen.mp4 import MP4
-gi.require_version('GExiv2', '0.10')  # noqa
-from gi.repository import GExiv2
 import bcrypt
 import tinycss2
 from captcha.image import ImageCaptcha
@@ -42,6 +37,7 @@ from .models import Sub, SubPost, User, SiteMetadata, SubSubscriber, Message, Us
 from .models import SubPostVote, SubPostComment, SubPostCommentVote, SiteLog, SubLog, db, SubPostReport, SubPostCommentReport
 from .models import SubMetadata, rconn, SubStylesheet, UserIgnores, SubUploads, SubFlair, InviteCode
 from .models import SubMod, SubBan
+from .storage import store_thumbnail, file_url, thumbnail_url
 from peewee import JOIN, fn, SQL, NodeList, Value
 import requests
 import logging
@@ -134,6 +130,12 @@ class SiteUser(object):
         self.is_anonymous = True if self.user['status'] != 0 else False
         self.can_admin = 'admin' in self.prefs
 
+        try:
+            SubMod.select().where(SubMod.user == self.uid).get()
+            self.is_a_mod = True
+        except:
+            self.is_a_mod = False
+
         if (time.time() - session.get('apriv', 0) < 7200) or not config.site.enable_totp:
             self.admin = 'admin' in self.prefs
         else:
@@ -156,14 +158,6 @@ class SiteUser(object):
     def is_mod(self, sid, power_level=2):
         """ Returns True if the current user is a mod of 'sub' """
         return is_sub_mod(self.uid, sid, power_level, self.can_admin)
-
-    def is_a_mod(self):
-        """ Returns True if the current user is a mod of any sub """
-        try:
-            SubMod.select().where(SubMod.user == current_user.uid).get() or current_user.can_admin
-            return True
-        except SubMod.DoesNotExist:
-            return False
 
     def is_subban(self, sub):
         """ Returns True if the current user is banned from 'sub' """
@@ -240,6 +234,8 @@ class SiteAnon(AnonymousUserMixin):
     canupload = False
     language = None
     score = 0
+    is_a_mod = False
+    can_admin = False
 
     def get_id(self):
         return False
@@ -753,7 +749,6 @@ def _image_entropy(img):
 
 
 THUMB_NAMESPACE = uuid.UUID('f674f09a-4dcf-4e4e-a0b2-79153e27e387')
-FILE_NAMESPACE = uuid.UUID('acd2da84-91a2-4169-9fdb-054583b364c4')
 
 
 def get_thumbnail(link):
@@ -795,6 +790,14 @@ def get_thumbnail(link):
     else:
         return ''
 
+    thash = hashlib.blake2b(im.tobytes())
+    im = generate_thumb(im)
+    filename = store_thumbnail(im, str(uuid.uuid5(THUMB_NAMESPACE, thash.hexdigest())))
+    im.close()
+    return filename
+
+
+def generate_thumb(im: Image) -> Image:
     x, y = im.size
     while y > x:
         slice_height = min(y - x, 10)
@@ -809,15 +812,7 @@ def get_thumbnail(link):
         x, y = im.size
 
     im.thumbnail((70, 70), Image.ANTIALIAS)
-    im.seek(0)
-    md5 = hashlib.md5(im.tobytes())
-    filename = str(uuid.uuid5(THUMB_NAMESPACE, md5.hexdigest())) + '.jpg'
-    im.seek(0)
-    if not os.path.isfile(os.path.join(config.storage.thumbnails.path, filename)):
-        im.save(os.path.join(config.storage.thumbnails.path, filename), "JPEG", optimize=True, quality=85)
-    im.close()
-
-    return filename
+    return im
 
 
 def getAdminUserBadges():
@@ -1352,7 +1347,7 @@ def validate_css(css, sid):
     # create a map for uris.
     uris = {}
     for su in SubUploads.select().where(SubUploads.sid == sid):
-        uris[su.name] = config.storage.uploads.url + su.fileid
+        uris[su.name] = file_url(su.fileid)
     for x in st:
         if x.__class__.__name__ == "AtRule":
             if x.at_keyword.lower() == "import":
@@ -1407,8 +1402,8 @@ def populate_feed(feed, posts):
         url = url_for('sub.view_post', sub=post['sub'], pid=post['pid'], _external=True)
 
         if post['thumbnail']:
-            content += '<td><a href=' + url + '"><img src="' + config.storage.thumbnails.url + post[
-                'thumbnail'] + '" alt="' + post['title'] + '"/></a></td>'
+            content += '<td><a href=' + url + '"><img src="' + thumbnail_url(post[
+                'thumbnail']) + '" alt="' + post['title'] + '"/></a></td>'
         content += '<td>Submitted by <a href=/u/' + post['user'] + '>' + post['user'] + '</a><br/>' + our_markdown(
             post['content'])
         if post['link']:
@@ -1478,6 +1473,8 @@ LOG_TYPE_ENABLE_INVITE = 47
 LOG_TYPE_DISABLE_INVITE = 48
 LOG_TYPE_DISABLE_REGISTRATION = 49
 LOG_TYPE_ENABLE_REGISTRATION = 50
+
+LOG_TYPE_USER_UNBAN = 51
 
 
 def create_sitelog(action, uid, comment='', link=''):
@@ -1843,6 +1840,9 @@ def getReports(view, status, page, *args, **kwargs):
     # view = STR either 'mod' or 'admin'
     # status = STR: 'open', 'closed', or 'all'
     sid = kwargs.get('sid', None)
+    type = kwargs.get('type', None)
+    report_id = kwargs.get('report_id', None)
+    related = kwargs.get('related', None)
 
     # Get Subs for which user is Mod
     mod_subs = getModSubs(current_user.uid, 1)
@@ -1863,13 +1863,18 @@ def getReports(view, status, page, *args, **kwargs):
     ).join(User, on=User.uid == SubPostReport.uid) \
         .switch(SubPostReport)
 
-    # filter by if Mod or Admin view and if SID
+    # filter by if Mod or Admin view and if filtering by sub, specific post, or related posts
     if ((view == 'admin') and not sid):
         sub_post_reports = all_post_reports.where(SubPostReport.send_to_admin == True).join(SubPost).join(Sub).join(SubMod)
     elif ((view == 'admin') and sid):
         sub_post_reports = all_post_reports.where(SubPostReport.send_to_admin == True).join(SubPost).join(Sub).where(Sub.sid == sid).join(SubMod)
     elif ((view == 'mod') and sid):
         sub_post_reports = all_post_reports.join(SubPost).join(Sub).where(Sub.sid == sid).join(SubMod).where(SubMod.user == current_user.uid)
+    elif ((report_id) and (type == 'post') and (related != True)):
+        sub_post_reports = all_post_reports.where(SubPostReport.id == report_id).join(SubPost).join(Sub).join(SubMod)
+    elif ((report_id) and (type == 'post') and (related == True)):
+        base_report = getReports('mod', 'all', 1, type='post', report_id=report_id, related=False)
+        sub_post_reports = all_post_reports.where(SubPostReport.pid == base_report['pid']).join(SubPost).join(Sub).join(SubMod)
     else:
         sub_post_reports = all_post_reports.join(SubPost).join(Sub).join(SubMod).where(SubMod.user == current_user.uid)
 
@@ -1895,14 +1900,18 @@ def getReports(view, status, page, *args, **kwargs):
      ).join(User, on=User.uid == SubPostCommentReport.uid) \
          .switch(SubPostCommentReport)
 
-
-    # filter by if Mod or Admin view and if SID
+    # filter by if Mod or Admin view and if filtering by sub or specific post
     if ((view == 'admin') and not sid):
         sub_comment_reports = all_comment_reports.where(SubPostCommentReport.send_to_admin == True).join(SubPostComment).join(SubPost).join(Sub).join(SubMod)
     elif ((view == 'admin') and sid):
         sub_comment_reports = all_comment_reports.where(SubPostCommentReport.send_to_admin == True).join(SubPostComment).join(SubPost).join(Sub).where(Sub.sid == sid).join(SubMod)
     elif ((view == 'mod') and sid):
         sub_comment_reports = all_comment_reports.join(SubPostComment).join(SubPost).join(Sub).where(Sub.sid == sid).join(SubMod).where(SubMod.user == current_user.uid)
+    elif ((report_id) and (type == 'comment') and (related != True)):
+        sub_comment_reports = all_comment_reports.where(SubPostCommentReport.id == report_id).join(SubPostComment).join(SubPost).join(Sub).join(SubMod)
+    elif ((report_id) and (type == 'comment') and (related == True)):
+        base_report = getReports('mod', 'all', 1, type='comment', report_id=report_id, related=False)
+        sub_comment_reports = all_comment_reports.where(SubPostCommentReport.cid == base_report['cid']).join(SubPostComment).join(SubPost).join(Sub).join(SubMod)
     else:
         sub_comment_reports = all_comment_reports.join(SubPostComment).join(SubPost).join(Sub).join(SubMod).where(SubMod.user == current_user.uid)
 
@@ -1912,12 +1921,21 @@ def getReports(view, status, page, *args, **kwargs):
     open_sub_comment_reports = sub_comment_reports.where(SubPostCommentReport.open == True)
     closed_sub_comment_reports = sub_comment_reports.where(SubPostCommentReport.open == False)
 
-    # Define open and closed queries and counts
-    open_query = open_sub_post_reports | open_sub_comment_reports
-    closed_query = closed_sub_post_reports | closed_sub_post_reports
+    # Define open and closed queries and counts depending on whether query is for specific post
+    if ((report_id) and (type == 'post')):
+        open_query = open_sub_post_reports
+        closed_query = closed_sub_post_reports
+    elif((report_id) and (type == 'comment')):
+        open_query = open_sub_comment_reports
+        closed_query = closed_sub_comment_reports
+    else:
+        open_query = open_sub_post_reports | open_sub_comment_reports
+        closed_query = closed_sub_post_reports | closed_sub_comment_reports
+
     open_report_count = open_query.count()
     closed_report_count = closed_query.count()
 
+    # Order and paginate queries
     if (status == 'open'):
         query = open_query.order_by(open_query.c.datetime.desc())
         query = query.paginate(page, 50)
@@ -1930,5 +1948,9 @@ def getReports(view, status, page, *args, **kwargs):
         query = query.paginate(page, 50)
     else:
         return jsonify(msg=_('Invalid status request')), 400
+
+    if (report_id and type and not related):
+        # If only getting one report, this is a more usable format
+        return list(query.dicts())[0]
 
     return {'query': list(query.dicts()), 'open_report_count': str(open_report_count), 'closed_report_count': str(closed_report_count)}

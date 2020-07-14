@@ -18,7 +18,7 @@ from flask import render_template, request
 from flask_login import login_user, login_required, logout_user, current_user
 from flask_babel import _
 from ..config import config
-from .. import forms, misc, caching
+from .. import forms, misc, caching, storage
 from ..socketio import socketio
 from ..forms import LogOutForm, CreateSubFlair, DummyForm, CreateSubRule
 from ..forms import CreateSubForm, EditSubForm, EditUserForm, EditSubCSSForm, ChangePasswordForm
@@ -1644,8 +1644,10 @@ def delete_comment():
             misc.create_sublog(misc.LOG_TYPE_SUB_DELETE_COMMENT, current_user.uid, post.sid,
                                comment=form.reason.data, link=url_for('site.view_post_inbox', pid=comment.pid),
                                admin=True if (not current_user.is_mod(post.sid) and current_user.is_admin()) else False)
+            comment.status = 2
+        else:
+            comment.status = 1
 
-        comment.status = 1
         comment.save()
 
         q = Message.delete().where(Message.mlink == form.cid.data)
@@ -1805,66 +1807,27 @@ def sub_upload(sub):
         return engine.get_template('sub/css.html').render({'sub': sub, 'form': form, 'storage': int(remaining - (1024 * 1024)),
                                                            'error': _('Please select a file to upload.'), 'files': ufiles})
 
-    mtype = magic.from_buffer(ufile.read(1024), mime=True)
-
-    if mtype == 'image/jpeg':
-        extension = '.jpg'
-    elif mtype == 'image/png':
-        extension = '.png'
-    elif mtype == 'image/gif':
-        extension = '.gif'
-    else:
+    mtype = storage.mtype_from_file(ufile, allow_video_formats=False)
+    if mtype is None:
         return engine.get_template('sub/css.html').render({'sub': sub, 'form': form, 'storage': int(remaining - (1024 * 1024)),
                                                            'error': _('Invalid file type. Only jpg, png and gif allowed.'), 'files': ufiles})
 
-    ufile.seek(0)
-    md5 = hashlib.md5()
-    while True:
-        data = ufile.read(65536)
-        if not data:
-            break
-        md5.update(data)
-
-    f_name = str(uuid.uuid5(misc.FILE_NAMESPACE, md5.hexdigest())) + extension
-    ufile.seek(0)
-    lm = False
-    if not os.path.isfile(os.path.join(config.storage.uploads.path, f_name)):
-        lm = True
-        ufile.save(os.path.join(config.storage.uploads.path, f_name))
-        # remove metadata
-        if mtype != 'image/gif':  # Apparently we cannot write to gif images
-            misc.clear_metadata(os.path.join(config.storage.uploads.path, f_name), mtype)
-    # sadly, we can only get file size accurately after saving it
-    fsize = os.stat(os.path.join(config.storage.uploads.path, f_name)).st_size
-    if fsize > remaining:
-        if lm:
-            os.remove(os.path.join(config.storage.uploads.path, f_name))
+    try:
+        fhash = storage.calculate_file_hash(ufile, size_limit=remaining)
+    except storage.SizeLimitExceededError:
         return engine.get_template('sub/css.html').render({'sub': sub, 'form': form, 'storage': int(remaining - (1024 * 1024)),
                                                            'error': _('Not enough available space to upload file.'), 'files': ufiles})
+
+    basename = str(uuid.uuid5(storage.FILE_NAMESPACE, fhash))
+    f_name = storage.store_file(ufile, basename, mtype, remove_metadata=True)
+    fsize = storage.get_stored_file_size(f_name)
+
     # THUMBNAIL
     ufile.seek(0)
     im = Image.open(ufile).convert('RGB')
-    x, y = im.size
-    while y > x:
-        slice_height = min(y - x, 10)
-        bottom = im.crop((0, y - slice_height, x, y))
-        top = im.crop((0, 0, x, slice_height))
-
-        if misc._image_entropy(bottom) < misc._image_entropy(top):
-            im = im.crop((0, 0, x, y - slice_height))
-        else:
-            im = im.crop((0, slice_height, x, y))
-
-        x, y = im.size
-
-    im.thumbnail((70, 70), Image.ANTIALIAS)
-
-    im.seek(0)
-    md5 = hashlib.md5(im.tobytes())
-    filename = str(uuid.uuid5(misc.THUMB_NAMESPACE, md5.hexdigest())) + '.jpg'
-    im.seek(0)
-    if not os.path.isfile(os.path.join(config.storage.thumbnails.path, filename)):
-        im.save(os.path.join(config.storage.thumbnails.path, filename), "JPEG", optimize=True, quality=85)
+    thash = hashlib.blake2b(im.tobytes())
+    im = misc.generate_thumb(im)
+    filename = storage.store_thumbnail(im, str(uuid.uuid5(misc.THUMB_NAMESPACE, thash.hexdigest())))
     im.close()
 
     SubUploads.create(sid=sub.sid, fileid=f_name, thumbnail=filename, size=fsize, name=fname)
@@ -1883,12 +1846,12 @@ def sub_upload_delete(sub, name):
     if not form.validate():
         return redirect(url_for('sub.edit_sub_css', sub=sub.name))
     if not current_user.is_mod(sub.sid, 1) and not current_user.is_admin():
-        jsonify(status='error')
+        return jsonify(status='error')
 
     try:
         img = SubUploads.get((SubUploads.sid == sub.sid) & (SubUploads.name == name))
     except SubUploads.DoesNotExist:
-        jsonify(status='error')
+        return jsonify(status='error')
     fileid = img.fileid
     img.delete_instance()
     misc.create_sublog(misc.LOG_TYPE_SUB_CSS_CHANGE, current_user.uid, sub.sid)
@@ -1900,7 +1863,8 @@ def sub_upload_delete(sub, name):
         try:
             SubUploads.get(SubUploads.fileid == img.fileid)
         except SubUploads.DoesNotExist:
-            os.remove(os.path.join(config.storage.uploads.path, img.fileid))
+            # TODO thumbnail does not get deleted
+            storage.remove_file(img.fileid)
 
     return jsonify(status='ok')
 
@@ -1951,10 +1915,39 @@ def ban_user(username):
     except User.DoesNotExist:
         abort(404)
 
+    if user.uid == current_user.uid:
+        abort(403)
+
     user.status = 5
     user.save()
     misc.create_sitelog(misc.LOG_TYPE_USER_BAN, uid=current_user.uid, comment=user.name)
-    return redirect(url_for('user.view', user=username))
+    return redirect(request.referrer)
+
+
+@do.route('/do/admin/unban_user/<username>', methods=['POST'])
+@login_required
+def unban_user(username):
+    if not current_user.is_admin():
+        abort(403)
+
+    form = DummyForm()
+    if not form.validate():
+        abort(403)
+
+    try:
+        user = User.get(fn.Lower(User.name) == username.lower())
+    except User.DoesNotExist:
+        abort(404)
+
+    try:
+        user.status = 5
+    except:
+        return jsonify(status='error', error='user is not banned')
+
+    user.status = 0
+    user.save()
+    misc.create_sitelog(misc.LOG_TYPE_USER_UNBAN, uid=current_user.uid, comment=user.name)
+    return redirect(request.referrer)
 
 
 @do.route('/do/edit_top_bar', methods=['POST'])
@@ -2374,3 +2367,96 @@ def close_comment_report(id, action):
 
     else:
         return jsonify(status='error', error=_('Failed to update report'))
+
+
+@do.route('/do/report/close_post_related_reports/<related_reports>', methods=['POST'])
+@login_required
+def close_post_related_reports(related_reports):
+    related_reports = json.loads(related_reports)
+    error = ''
+    # ensure user is mod or admin and report, post, and sub exist
+    for related_report in related_reports:
+        try:
+            report = SubPostReport.get(SubPostReport.id == related_report['id'])
+        except SubPostReport.DoesNotExist:
+            error = jsonify(status='error', error=_('Report does not exist'))
+
+        try:
+            post = SubPost.get(SubPost.pid == report.pid)
+        except SubPost.DoesNotExist:
+            error = jsonify(status='error', error=_('Post does not exist'))
+
+        try:
+            sub = Sub.get(Sub.sid == post.sid)
+        except Sub.DoesNotExist:
+            error = jsonify(status='error', error=_('Sub does not exist'))
+
+        if not current_user.is_mod(sub.sid) and not current_user.is_admin():
+            error = jsonify(status='error', error=_('Not authorized'))
+
+        report = SubPostReport.update(open=False).where(SubPostReport.id == related_report['id']).execute()
+
+        #check if report is closed and return status
+        updated_report = SubPostReport.select().where(SubPostReport.id == related_report['id']).get()
+        if updated_report.open == False:
+            ok = jsonify(status='ok')
+
+        elif updated_report.open == True:
+            error = jsonify(status='error', error=_('Failed to close report'))
+
+        else:
+            error = jsonify(status='error', error=_('Failed to update report'))
+
+    if error != '':
+        return error
+    else:
+        return ok
+
+
+@do.route('/do/report/close_comment_related_reports/<related_reports>', methods=['POST'])
+@login_required
+def close_comment_related_reports(related_reports):
+    related_reports = json.loads(related_reports)
+    error = ''
+    # ensure user is mod or admin and report, post, and sub exist
+    for related_report in related_reports:
+        try:
+            report = SubPostCommentReport.get(SubPostCommentReport.id == related_report['id'])
+        except SubPostCommentReport.DoesNotExist:
+            error = jsonify(status='error', error=_('Report does not exist'))
+
+        try:
+            comment = SubPostComment.get(SubPostComment.cid == report.cid)
+        except SubPostCommentReport.DoesNotExist:
+            error = jsonify(status='error', error=_('Comment does not exist'))
+
+        try:
+            post = SubPost.get(SubPost.pid == comment.pid)
+        except SubPost.DoesNotExist:
+            error = jsonify(status='error', error=_('Post does not exist'))
+
+        try:
+            sub = Sub.get(Sub.sid == post.sid)
+        except Sub.DoesNotExist:
+            error = jsonify(status='error', error=_('Sub does not exist'))
+
+        if not current_user.is_mod(sub.sid) and not current_user.is_admin():
+            error = jsonify(status='error', error=_('Not authorized'))
+
+        report = SubPostCommentReport.update(open=False).where(SubPostCommentReport.id == related_report['id']).execute()
+
+        #check if report is closed and return status
+        updated_report = SubPostCommentReport.select().where(SubPostCommentReport.id == related_report['id']).get()
+        if updated_report.open == False:
+            ok = jsonify(status='ok')
+
+        elif updated_report.open == True:
+            error = jsonify(status='error', error=_('Failed to close report'))
+
+        else:
+            error = jsonify(status='error', error=_('Failed to update report'))
+
+    if error != '':
+        return error
+    else:
+        return ok
