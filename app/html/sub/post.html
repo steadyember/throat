@@ -159,7 +159,7 @@
     </div>
   </div>
 
-  @if (subInfo.get('ucf', 0) == 1 and current_user.uid == post.uid) or current_user.uid in subMods['all']:
+  @if (subInfo.get('ucf', 0) == '1' and current_user.uid == post['uid']) or current_user.uid in subMods['all']:
     <div style="display:none;" id="postflairs">
       <span class="closemsg">×</span>
       @if post['flair']:
@@ -211,10 +211,10 @@
   @end
 
   @if len(comments) == 0:
-    <div class="comments"><h3 id="cmnts">@{_('No comments, yet...')}</h3></div>
+    <div class="comments"><h3 id="cmnts" data-cnt="0">@{_('No comments, yet...')}</h3></div>
   @else:
     <div class="comments">
-      <h2 id="cmnts"><a href="@{url_for('sub.view_post', sub=sub['name'], pid=post['pid'])}">@{_('%(comments)i comments', comments=post['comments'])}</a></h2>
+      <h2 id="cmnts" data-cnt="@{post['comments']}"><a href="@{url_for('sub.view_post', sub=sub['name'], pid=post['pid'])}">@{_('%(comments)i comments', comments=post['comments'])}</a></h2>
       @{pcomm.renderComments(post, subInfo, subMods, comments, highlight)!!html}
     </div>
   @end
