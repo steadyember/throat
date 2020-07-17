@@ -47,6 +47,10 @@ def create_app(config=Config('config.yaml')):
     app.config.update(config.get_flask_dict())
     app.config['WEBPACK_MANIFEST_PATH'] = 'manifest.json'
 
+    # For flask-login, securely handle the "Remember me" cookie.
+    app.config['REMEMBER_COOKIE_HTTPONLY'] = True
+    app.config['REMEMBER_COOKIE_SECURE'] = not app.config['DEBUG']
+
     csp = { 'default-src': '\'self\'' }
     media_servers = [ '\'self\'' ]
     for url in [config.storage.thumbnails.url, config.storage.uploads.url]:
