@@ -47,6 +47,8 @@ def create_app(config=Config('config.yaml')):
     app.config.update(config.get_flask_dict())
     app.config['WEBPACK_MANIFEST_PATH'] = 'manifest.json'
 
+    app.config['SESSION_COOKIE_SECURE'] = True
+
     # For flask-login, securely handle the "Remember me" cookie.
     app.config['REMEMBER_COOKIE_HTTPONLY'] = True
     app.config['REMEMBER_COOKIE_SECURE'] = not app.config['DEBUG']
@@ -56,7 +58,7 @@ def create_app(config=Config('config.yaml')):
     for url in [config.storage.thumbnails.url, config.storage.uploads.url]:
         if url not in media_servers:
             media_servers.append(url)
-    csp['img-src'] = media_servers
+    csp['img-src'] = media_servers + ['data:']
     csp['media-src'] = media_servers
     talisman.init_app(app,
                       content_security_policy=csp,
