@@ -31,6 +31,10 @@ If you prefer to develop on docker
  - In addition, configs are overridden by environment variables set in docker-compose.yml
    which reference the redis and postgres services created by docker-compose.
 
+To build node modules that can be used within the container, be sure to _not_ run `npm install`
+from your host machine. Rather, use `docker-compose run throat npm install` so that package
+architecture appropriate for the container is selected.
+
 `make up` will bring the containerized site up and mount your current working directory
 inside the container for dev. `make down` will spin down the containerized services.
 

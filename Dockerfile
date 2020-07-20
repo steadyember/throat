@@ -1,13 +1,14 @@
 FROM node:14-buster-slim
 
-COPY requirements.txt /requirements.txt
-COPY package.json /package.json
-COPY package-lock.json /package-lock.json
+EXPOSE 5000
 
-RUN useradd -ms /bin/bash app
+WORKDIR /throat
+
+COPY requirements.txt package.json package-lock.json* ./
 
 RUN \
-  apt-get update && apt-get install -yqq \
+  useradd -ms /bin/bash app \
+  && apt-get update && apt-get install -yqq \
      build-essential \
      python3-dev \
      python3-pip \
@@ -16,21 +17,15 @@ RUN \
      libgexiv2-dev \
      libpq-dev \
      postgresql-client \
-  # Install our python requirements
-  && pip3 install -r requirements.txt && rm requirements.txt \
-  # Install our npm requirements
-  && npm ci && rm package.json && rm package-lock.json \
-  # Clean Up
+  && pip3 install -r requirements.txt \
+  && npm install && npm cache clean --force \
   && rm -rf /var/lib/apt/lists/*
 
-COPY . /throat
-WORKDIR /throat
-RUN \
-  mv ../node_modules node_modules \
-  && npm run build \
+COPY . .
+
+RUN npm run build  \
   && chown -R app:app .
 
 USER app
-EXPOSE 5000
 
 CMD ["./throat.py"]
