@@ -50,7 +50,7 @@
 @end
 <hr>
 @if sub['sidebar'] != '':
-  @{func.our_markdown(sub['sidebar'])}
+  @{func.our_markdown(sub['sidebar'])!!html}
   <hr>
 @end
 
@@ -69,7 +69,7 @@
   </ul>
 </div>
 <div class="createdby">
-  @{_('Created by <a href="/u/%(name)s">%(name)s</a>', name=subInfo['creator']['name'])}
+  @{_('Created by <a href="/u/%(name)s">%(name)s</a>', name=subInfo['creator']['name'])!!html}
   <time-ago datetime="@{sub['creation'].isoformat()}Z"></time-ago>
 </div>
 @if current_user.uid:
@@ -78,7 +78,7 @@
     <a href="@{url_for('sub.edit_sub_flairs', sub=sub['name'])}" class="sbm-post pure-button">@{_('Edit flairs')}</a>
     <a href="@{url_for('sub.edit_sub_rules', sub=sub['name'])}" class="sbm-post pure-button">@{_('Edit rules')}</a>
     <a href="@{url_for('sub.edit_sub_css', sub=sub['name'])}" class="sbm-post pure-button">@{_('Edit stylesheet')}</a>
-    <a href="@{url_for('mod.index')}" class="sbm-post pure-button">@{_('Mod Dashboard')}</a>
+    <a href="@{url_for('mod.reports_sub', sub=sub['name'])}" class="sbm-post pure-button">@{_('Sub Moderation')}</a>
   @end
   @if current_user.uid in subMods['all'] or current_user.is_admin():
     <a href="@{url_for('sub.edit_sub_mods', sub=sub['name'])}" class="sbm-post pure-button">@{_('Moderators')}</a>

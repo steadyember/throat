@@ -36,7 +36,23 @@ from your host machine. Rather, use `docker-compose run throat npm install` so t
 architecture appropriate for the container is selected.
 
 `make up` will bring the containerized site up and mount your current working directory
-inside the container for dev. `make down` will spin down the containerized services.
+inside the container for dev. It also runs the migrations on start-up. `make down` will spin down the containerized services.
+
+To add an admin user to a running docker-compose application:
+`docker exec throat_throat_1 python3 scripts/admins.py --add {{username}}`
+
+If Wheezy templates are not automatically reloading in docker between changes, try `docker restart throat_throat_1`.
+
+## Docker Deployments
+
+### Gunicorn
+```
+CMD [ "gunicorn", \
+      "-w", "4", \
+      "-k", "geventwebsocket.gunicorn.workers.GeventWebSocketWorker", \
+      "-b", "0.0.0.0:5000", \
+      "throat:app" ]
+```
 
 ## Tests
 

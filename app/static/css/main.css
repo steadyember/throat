@@ -523,7 +523,7 @@ span#notification.fade {
 	color: #d95204;
 }
 
-.post .title:hover {
+.post a.title:hover {
 	color: #ff6d15;
 }
 .misctainer {
@@ -1223,6 +1223,10 @@ input[type=search] {
     .pbody {
         width: calc(100% - 105px);
     }
+
+    .content.wiki {
+        width: 95%;
+    }
 }
 
 #createPostIcon {
@@ -1251,6 +1255,10 @@ input[type=search] {
 
     #createPostIcon {
         display: none;
+    }
+
+    .content.wiki {
+        width: 65%;
     }
 }
 
@@ -1344,10 +1352,13 @@ article.comment .score{
   display: inline-block;
   height: 20px;
   width: 20px;
-  border: solid 1px black;
-  margin-right: 1px;
+  margin-right: 6px;
   text-align: center;
   padding-top: 1px;
+}
+
+.editbtns div:hover{
+  background: #ccc;
 }
 
 .editbtns div svg{
@@ -2001,4 +2012,121 @@ a.close-report {
 .helper-text {
   font-style: italic;
   color: gray;
+}
+
+.mod-dash-subs {
+  margin: 0 auto;
+  display: flex;
+  justify-content: flex-start;
+  align-items: center;
+  flex-wrap: wrap;
+  max-width: 800px;
+}
+
+.mod-dash-sub {
+  margin: 10px;
+}
+
+@media (min-width: 860px) {
+  .mod.report.content {
+    min-width: 650px;
+  }
+}
+
+.mod.report.close.buttons {
+  display: flex;
+  align-items: flex-start;
+}
+
+.mod.report.close.buttons button {
+  margin: 10px 5px 10px 0;
+}
+
+.mod button.disabled {
+  background-color: gray;
+  pointer-events: none;
+}
+
+.mod.report.details {
+  margin: 20px auto;
+  width: 100%;
+}
+
+.report-details-row {
+  min-width: 500px;
+  display: flex;
+  flex-direction: row;
+  justify-content: space-between;
+  margin: 10px auto;
+  width: 100%;
+}
+
+.report-details-item {
+  min-width: 200px;
+  width: 50%;
+}
+
+.report-details-item .label{
+  font-weight: bold;
+}
+
+.mod.report.preview {
+  max-width: 600px;
+}
+
+.mod .user-actions {
+  display: flex;
+  justify-content: flex-start;
+}
+
+.mod .user-actions .pure-button {
+  margin: 10px 5px 10px 0;
+}
+
+.mod.report.preview .preview-text-container {
+  border-left: 3px solid gray;
+  margin: 10px;
+}
+
+.mod.report.preview .preview-text-container .preview-text {
+  color: gray;
+  padding-left: 10px;
+}
+
+.mod.report.preview .preview-text-container.deleted {
+  background-color: #FDD8D4;
+}
+
+.mod.report.preview .preview-text-container.deleted #postcontent {
+  background-color: #FDD8D4;
+}
+
+.mod.report.preview .preview-meta-data {
+  display: flex;
+  align-items: center;
+  color: gray;
+}
+
+.mod.report.preview .preview-meta-data span {
+  margin: 0 10px;
+}
+
+.mod-sidebar.header {
+  text-align: center;
+}
+
+article.text-post.comment.deleted {
+  background-color: #FDD8D4;
+}
+
+#postcontent.deleted {
+  background-color: #FDD8D4;
+}
+
+.postbar.post.deleted {
+  background-color: #FDD8D4;
+}
+
+.poll-space.deleted {
+  background-color: #FDD8D4;
 }

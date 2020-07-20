@@ -514,27 +514,37 @@ u.addEventForChild(document, 'click', '.btn-postcomment', function (e, qelem) {
     const content = document.querySelector('#rcomm-' + cid + ' textarea').value;
     qelem.setAttribute('disabled', true);
     window.sending = true;
-    u.post('/do/sendcomment/' + pid, {parent: cid, post: pid, comment: content},
+    let pcid = cid;
+    if(pcid[0] == '-') pcid = 0;
+    u.post('/do/sendcomment/' + pid, {parent: pcid, post: pid, comment: content},
         function (data) {
             if (data.status != "ok") {
                 qelem.parentNode.querySelector('.error').style.display = 'block';
-                qelem.parentNode.querySelector('.error').innerHTML = _('There was an error while editing: %1', data.error);
+                qelem.parentNode.querySelector('.error').innerHTML = data.error;
                 qelem.removeAttribute('disabled');
             } else {
                 qelem.innerHTML = _('Saved.');
                 const cmtcount = document.getElementById('cmnts');
                 window.sending = false;
+                if(!cmtcount) {
+                    document.querySelector('.reply-comment[data-to="' + cid + '"] s').click();
+                    return;
+                }
+                let count = cmtcount.getAttribute('data-cnt');
+                count = count ? count : 0;
+                cmtcount.setAttribute('data-cnt', parseInt(count) + 1);
                 if (cmtcount.getElementsByTagName('a').length === 0) {
                     const a = document.createElement('a');
                     a.href = '/p/' + pid;
-                    a.innerText = _("1 comments");
+                    a.innerText = _("1 comment");
                     a.id = 'cmnts';
                     cmtcount.innerText = '';
                     cmtcount.appendChild(a);
 
                 } else {
                     const va = cmtcount.getElementsByTagName('a')[0];
-                    va.innerText = _("%1 comments", parseInt(va.innerText.split(' ')[0]) + 1);
+
+                    va.innerText = _("%1 comments", cmtcount.getAttribute('data-cnt'));
                     if (va.pathname != window.location.pathname && cid == '0') {
                         document.location = data.addr;
                     }
@@ -571,7 +581,7 @@ let reportHtml = (data, sub_rules_html) => '<h2>' + _('Report post') + '</h2>' +
     '<div class="pure-control-group">' +
     '<label for="report_reason">' + _('Select a reason to report this post:') + '</label>' +
     '<select name="report_reason" id="report_reason">' +
-      '<option value="" disabled selected>Select one..</option>' +
+      '<option value="" disabled selected>' + _('Select one...') + '</option>' +
       '<option value="spam">' + _('SPAM') + '</option>' +
       '<option value="tos">' + _('TOS violation') + '</option>' +
       '<option value="rule">' + _('Sub Rule violation') + '</option>' +
@@ -581,9 +591,9 @@ let reportHtml = (data, sub_rules_html) => '<h2>' + _('Report post') + '</h2>' +
   '<div class="pure-control-group" style="display:none" id="report_rule_set">'+
   '<label for="report_reason">' + _('Which Sub rule did this post violate?') + '</label>' +
     '<select name="report_rule" id="report_rule">' +
-      '<option value="" disabled selected>Select one..</option>' +
+      '<option value="" disabled selected>' + _('Select one...') + '</option>' +
       sub_rules_html +
-      '<option value="other sub rule">Other Sub Rule</option>' +
+      '<option value="other sub rule">' + _('Other sub rule') + '</option>' +
     '</select>' +
   '</div>' +
   '<div class="pure-control-group" style="display:none" id="report_text_set">'+
@@ -596,14 +606,18 @@ let reportHtml = (data, sub_rules_html) => '<h2>' + _('Report post') + '</h2>' +
   '</div>' +
 '</form>';
 
-u.addEventForChild(document, 'click', '.report-post', function (e, qelem) {
-    const pid = qelem.parentNode.parentNode.parentNode.getAttribute('pid');
+let report_classes = ['.report-post', '.report-comment']
+
+u.addEventForChild(document, 'click', report_classes, function (e, qelem) {
+    const pid = qelem.getAttribute('data-pid');
+    const cid = qelem.getAttribute('cid');
 
     // fetch sub rules
     u.get('/api/v3/sub/rules?pid=' + pid, function(data){
       let rules = [];
       let sub_rules_html = '';
       rules = data.results;
+
       // set html element for each sub rule
       rules.forEach(function(rule) {
         let rule_html = '<option value="Sub Rule: ' + rule.text + '">' + rule.text + '</option>';
@@ -613,25 +627,22 @@ u.addEventForChild(document, 'click', '.report-post', function (e, qelem) {
 
       const modal = new Tingle.modal({});
       // set content
-      modal.setContent(reportHtml('data-pid=' + pid, 'sub_rules_html=' + sub_rules_html));
+      if (cid) {
+        modal.setContent(reportHtml('data-cid=' + cid, 'sub_rules_html=' + sub_rules_html));
+      }
+      else {
+        modal.setContent(reportHtml('data-pid=' + pid, 'sub_rules_html=' + sub_rules_html));
+      }
       // open modal
       modal.open();
     });
-});
-
-u.addEventForChild(document, 'click', '.report-comment', function (e, qelem) {
-    const cid = qelem.getAttribute('cid');
-    const modal = new Tingle.modal({});
-    // set content
-    modal.setContent(reportHtml('data-cid=' + cid));
-    // open modal
-    modal.open();
 });
 
 u.addEventForChild(document, 'change', '#report_reason', function (e, qelem) {
     if (qelem.value != '' && qelem.value != 'other' && qelem.value != 'rule') {
         document.getElementById('submit_report').removeAttribute('disabled');
         document.getElementById('report_text_set').style.display = 'none';
+        document.getElementById('report_rule_set').style.display = 'none';
     } else if (qelem.value == 'other') {
         if (document.getElementById('report_text').value.length < 3) {
             document.getElementById('submit_report').setAttribute('disabled', 'true');
@@ -642,8 +653,14 @@ u.addEventForChild(document, 'change', '#report_reason', function (e, qelem) {
         if (document.getElementById('report_rule').value == '') {
             document.getElementById('submit_report').setAttribute('disabled', 'true');
         }
-        document.getElementById('report_text_set').style.display = 'none';
-        document.getElementById('report_rule_set').style.display = 'block';
+        if (document.getElementById('report_rule').value == 'other sub rule') {
+          document.getElementById('report_rule_set').style.display = 'block';
+          document.getElementById('report_text_set').style.display = 'block';
+        }
+        else {
+          document.getElementById('report_text_set').style.display = 'none';
+          document.getElementById('report_rule_set').style.display = 'block';
+        }
     }
 });
 
@@ -662,15 +679,18 @@ u.addEventForChild(document, 'change', '#report_rule', function (e, qelem) {
       }
       document.getElementById('report_text_set').style.display = 'block';
   } else if (qelem.value != '') {
+    document.getElementById('report_text_set').style.display = 'none';
     document.getElementById('submit_report').removeAttribute('disabled');
   } else {
-      document.getElementById('submit_report').setAttribute('disabled', 'true');
+    document.getElementById('report_text_set').style.display = 'none';
+    document.getElementById('submit_report').setAttribute('disabled', 'true');
   }
 });
 
 
 u.addEventForChild(document, 'click', '#submit_report', function (e, qelem) {
     let pid = qelem.getAttribute('data-pid');
+    let cid = qelem.getAttribute('data-cid');
 
     const errorbox = qelem.parentNode.querySelector('.error');
 
@@ -690,7 +710,7 @@ u.addEventForChild(document, 'click', '#submit_report', function (e, qelem) {
 
     qelem.setAttribute('disabled', true);
     let uri = '/do/report';
-    if (!pid) {
+    if (cid) {
         pid = qelem.getAttribute('data-cid');
         uri = '/do/report/comment';
     }

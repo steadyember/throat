@@ -6,14 +6,11 @@ import base64
 import uuid
 import random
 import time
-import magic
 import os
 import hashlib
 import re
-import gi
+import gevent
 
-gi.require_version('GExiv2', '0.10')  # noqa
-from gi.repository import GExiv2
 import bcrypt
 import tinycss2
 from captcha.image import ImageCaptcha
@@ -23,8 +20,10 @@ from PIL import Image
 from bs4 import BeautifulSoup
 from functools import update_wrapper
 import misaka as m
-import redis
 import sendgrid
+from flask import current_app
+from flask_mail import Mail
+from flask_mail import Message as EmailMessage
 
 from .config import config
 from flask import url_for, request, g, jsonify, session
@@ -36,9 +35,11 @@ from .socketio import socketio
 from .badges import badges
 
 from .models import Sub, SubPost, User, SiteMetadata, SubSubscriber, Message, UserMetadata, SubRule
-from .models import SubPostVote, SubPostComment, SubPostCommentVote, SiteLog, SubLog, db, SubPostReport, SubPostCommentReport
-from .models import SubMetadata, rconn, SubStylesheet, UserIgnores, SubUploads, SubFlair
+from .models import SubPostVote, SubPostComment, SubPostCommentVote, SiteLog, SubLog, db
+from .models import SubPostReport, SubPostCommentReport, PostReportLog, CommentReportLog, Notification
+from .models import SubMetadata, rconn, SubStylesheet, UserIgnores, SubUploads, SubFlair, InviteCode
 from .models import SubMod, SubBan
+from .storage import store_thumbnail, file_url, thumbnail_url
 from peewee import JOIN, fn, SQL, NodeList, Value
 import requests
 import logging
@@ -53,11 +54,30 @@ allowedNames = re.compile("^[a-zA-Z0-9_-]+$")
 WHITESPACE = "\u0009\u000A\u000B\u000C\u000D\u0020\u0085\u00A0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007" \
              "\u2008\u2009\u200a\u200b\u2029\u202f\u205f\u3000\u180e\u200b\u200c\u200d\u2060\ufeff\u00AD\ufffc "
 
+
+def build_var(builder, lineno, token, value):
+    assert token == 'var'
+    var, _ = value
+    if not value[-1] or "html" not in value[-1]:
+        builder.add(lineno, 'w(e(str(' + var + ')))')
+    else:
+        builder.add(lineno, 'w(str(' + var + '))')
+    return True
+
+
+class EscapeExtension(object):
+    builder_rules = [
+        ('var', build_var)
+    ]
+
+
 _engine = Engine(
     loader=FileLoader([os.path.split(__file__)[0] + '/html']),
-    extensions=[CoreExtension()]
+    extensions=[EscapeExtension(), CoreExtension()]
 )
 engine = _engine
+
+mail = Mail()
 
 
 talisman = Talisman()
@@ -115,13 +135,21 @@ class SiteUser(object):
         self.is_anonymous = True if self.user['status'] != 0 else False
         self.can_admin = 'admin' in self.prefs
 
+        try:
+            SubMod.select().where(SubMod.user == self.uid).get()
+            self.is_a_mod = True
+        except:
+            self.is_a_mod = False
+
         if (time.time() - session.get('apriv', 0) < 7200) or not config.site.enable_totp:
             self.admin = 'admin' in self.prefs
         else:
             self.admin = False
 
         self.canupload = True if ('canupload' in self.prefs) or self.admin else False
-        if config.site.allow_uploads:
+        if config.site.allow_uploads and config.site.upload_min_level == 0:
+            self.canupload = True
+        elif config.site.allow_uploads and (config.site.upload_min_level <= get_user_level(self.uid, self.score)[0]):
             self.canupload = True
 
     def __repr__(self):
@@ -135,14 +163,6 @@ class SiteUser(object):
     def is_mod(self, sid, power_level=2):
         """ Returns True if the current user is a mod of 'sub' """
         return is_sub_mod(self.uid, sid, power_level, self.can_admin)
-
-    def is_a_mod(self):
-        """ Returns True if the current user is a mod of any sub """
-        try:
-            SubMod.select().where(SubMod.user == current_user.uid).get() or current_user.can_admin
-            return True
-        except SubMod.DoesNotExist:
-            return False
 
     def is_subban(self, sub):
         """ Returns True if the current user is banned from 'sub' """
@@ -219,6 +239,8 @@ class SiteAnon(AnonymousUserMixin):
     canupload = False
     language = None
     score = 0
+    is_a_mod = False
+    can_admin = False
 
     def get_id(self):
         return False
@@ -398,6 +420,7 @@ class RE_AMention():
         self.LINKS = re.compile(r"\[.*?({1}).*?\]\(.*?\)|({0})".format(PRE1, BARE),
                                 flags=re.MULTILINE + re.DOTALL)
 
+
 re_amention = RE_AMention()
 
 
@@ -529,16 +552,80 @@ def getMaxCodes(uid):
             return 0
     return 0
 
+@cache.memoize(30)
+def getInviteCodeInfo(uid):
+    """
+    Returns information about who invited a user and who they have invited.
+    """
+    info = {}
 
-def sendMail(to, subject, content):
-    """ Sends a mail through sendgrid """
+    # The invite code that this user used to sign up
+    try:
+        invite_code = UserMetadata.get((UserMetadata.key == 'invitecode') & (UserMetadata.uid == uid))
+        code = invite_code.value
+        invited_by_uid = InviteCode.get((InviteCode.code == code)).uid
+        invited_by_name = User.get((User.uid == invited_by_uid)).name
+        info['invitedBy'] = {'name': invited_by_name, 'code': code}
+    except UserMetadata.DoesNotExist:
+        pass
+
+    # Codes that this user has generated, that other users signed up with
+    try:
+        user_codes = InviteCode.select().where(InviteCode.uid == uid)
+        info['invitedTo'] = []
+        for code in user_codes:
+            try:
+                invited_users = UserMetadata.select().where((UserMetadata.key == 'invitecode') & (UserMetadata.value == code.code))
+                for user in invited_users:
+                    username = User.get((User.uid == user.uid)).name
+                    info['invitedTo'].append({'name': username, 'code': code.code})
+            except UserMetadata.DoesNotExist:
+                # no users have signed up with this code.
+                pass
+    except InviteCode.DoesNotExist:
+        pass
+
+    return info
+
+
+def send_email(to, subject, text_content, html_content, sender=None):
+    if 'server' in config.mail:
+        if sender is None:
+            sender = config.mail.default_from
+        send_email_with_smtp(sender, to, subject, text_content, html_content)
+    elif 'sendgrid' in config:
+        if sender is None:
+            sender = config.sendgrid.default_from
+        send_email_with_sendgrid(sender, to, subject, html_content)
+    else:
+        raise RuntimeError('Email not configured')
+
+
+def send_email_with_smtp(sender, recipients, subject, text_content, html_content):
+    if not isinstance(recipients, list):
+        recipients = [recipients]
+    msg = EmailMessage(subject, sender=sender, recipients=recipients,
+                       body=text_content, html=html_content)
+    if config.app.testing:
+        send_smtp_email_async(current_app, msg)
+    else:
+        gevent.spawn(send_smtp_email_async, current_app._get_current_object(), msg)
+
+
+def send_smtp_email_async(app, msg):
+    with app.app_context():
+        mail.send(msg)
+
+
+def send_email_with_sendgrid(sender, to, subject, html_content):
+    """ Send a mail through sendgrid """
     sg = sendgrid.SendGridAPIClient(api_key=config.sendgrid.api_key)
 
     mail = sendgrid.helpers.mail.Mail(
-        from_email=config.sendgrid.default_from,
+        from_email=sender,
         to_emails=to,
         subject=subject,
-        html_content=content)
+        html_content=html_content)
 
     sg.send(mail)
 
@@ -562,10 +649,6 @@ def getYoutubeID(url):
 def workWithMentions(data, receivedby, post, sub, cid=None, c_user=current_user):
     """ Does all the job for mentions """
     mts = re.findall(re_amention.LINKS, data)
-    if isinstance(sub, Sub):
-        subname = sub.name
-    else:
-        subname = sub['name']
     if mts:
         mts = list(set(mts))  # Removes dupes
         clean_mts = []
@@ -594,14 +677,11 @@ def workWithMentions(data, receivedby, post, sub, cid=None, c_user=current_user)
             if user.uid != c_user.uid and user.uid != receivedby:
                 # Checks done. Send our shit
                 if cid:
-                    link = url_for('sub.view_perm', pid=post.pid, sub=subname, cid=cid)
+                    Notification(type='COMMENT_MENTION', sub=post.sid, post=post.pid, comment=cid,
+                                 sender=c_user.uid, target=user.uid).save()
                 else:
-                    link = url_for('sub.view_post', pid=post.pid, sub=subname)
-                create_message(c_user.uid, user.uid,
-                               subject="You've been tagged in a post",
-                               content="@{0} tagged you in [{1}]({2})"
-                               .format(c_user.name, "Here: " + post.title, link),
-                               link=link, mtype=8)
+                    Notification(type='POST_MENTION', sub=post.sid, post=post.pid, comment=cid,
+                                 sender=c_user.uid, target=user.uid).save()
                 socketio.emit('notification',
                               {'count': get_notification_count(user.uid)},
                               namespace='/snt',
@@ -667,7 +747,6 @@ def _image_entropy(img):
 
 
 THUMB_NAMESPACE = uuid.UUID('f674f09a-4dcf-4e4e-a0b2-79153e27e387')
-FILE_NAMESPACE = uuid.UUID('acd2da84-91a2-4169-9fdb-054583b364c4')
 
 
 def get_thumbnail(link):
@@ -709,6 +788,14 @@ def get_thumbnail(link):
     else:
         return ''
 
+    thash = hashlib.blake2b(im.tobytes())
+    im = generate_thumb(im)
+    filename = store_thumbnail(im, str(uuid.uuid5(THUMB_NAMESPACE, thash.hexdigest())))
+    im.close()
+    return filename
+
+
+def generate_thumb(im: Image) -> Image:
     x, y = im.size
     while y > x:
         slice_height = min(y - x, 10)
@@ -723,15 +810,7 @@ def get_thumbnail(link):
         x, y = im.size
 
     im.thumbnail((70, 70), Image.ANTIALIAS)
-    im.seek(0)
-    md5 = hashlib.md5(im.tobytes())
-    filename = str(uuid.uuid5(THUMB_NAMESPACE, md5.hexdigest())) + '.jpg'
-    im.seek(0)
-    if not os.path.isfile(os.path.join(config.storage.thumbnails.path, filename)):
-        im.save(os.path.join(config.storage.thumbnails.path, filename), "JPEG", optimize=True, quality=85)
-    im.close()
-
-    return filename
+    return im
 
 
 def getAdminUserBadges():
@@ -860,6 +939,10 @@ def getPostList(baseQuery, sort, page):
         if config.database.engine == "PostgresqlDatabase":
             hot = SubPost.score * 20 + (fn.EXTRACT(NodeList((SQL('EPOCH FROM'), SubPost.posted))) - 1134028003) / 1500
             posts = baseQuery.order_by(hot.desc()).limit(100).paginate(page, 25)
+        elif config.database.engine == 'SqliteDatabase':
+            posts = baseQuery.order_by(
+                (SubPost.score * 20 + (fn.datetime(SubPost.posted, 'unixepoch') - 1134028003) / 1500).desc()).limit(
+                100).paginate(page, 25)
         else:
             posts = baseQuery.order_by(
                 (SubPost.score * 20 + (fn.Unix_Timestamp(SubPost.posted) - 1134028003) / 1500).desc()).limit(
@@ -904,11 +987,12 @@ def getStickies(sid):
 
 
 def load_user(user_id):
-    user = User.select(fn.Count(Message.mid).alias('notifications'),
+    user = User.select((fn.Count(Message.mid) + fn.Count(Notification.id)).alias('notifications'),
                        User.given, User.score, User.name, User.uid, User.status, User.email, User.language)
     user = user.join(Message, JOIN.LEFT_OUTER, on=(
-            (Message.receivedby == User.uid) & (Message.mtype != 6) & (Message.mtype != 9) &
-            (Message.mtype != 41) & Message.read.is_null(True))).switch(User)
+            (Message.receivedby == User.uid) & (Message.mtype == 1) & Message.read.is_null(True))).switch(User)
+    user = user.join(Notification, JOIN.LEFT_OUTER,
+                     on=(Notification.target == User.uid) & Notification.read.is_null(True)).switch(User)
     user = user.group_by(User.uid).where(User.uid == user_id).dicts().get()
 
     if request.path == '/socket.io/':
@@ -927,8 +1011,9 @@ def load_user(user_id):
 
 
 def get_notification_count(uid):
-    return Message.select().where((Message.receivedby == uid) & (Message.mtype != 6) & (Message.mtype != 9) & (
-            Message.mtype != 41) & Message.read.is_null(True)).count()
+    msg = Message.select().where((Message.receivedby == uid) & (Message.mtype == 1) & Message.read.is_null(True)).count()
+    notif = Notification.select().where((Notification.target == uid) & Notification.read.is_null(True)).count()
+    return msg + notif
 
 
 def get_errors(form, first=False):
@@ -1075,12 +1160,19 @@ def getUserBadges(uid):
     return ret
 
 
-def clear_metadata(path: str):
-    exif = GExiv2.Metadata()
-    exif.open_path(path)
-    exif.clear_exif()
-    exif.clear_xmp()
-    exif.save_file(path)
+def clear_metadata(path: str, mime_type: str):
+    if mime_type in ('image/jpeg', 'image/png'):
+        exif = GExiv2.Metadata()
+        exif.open_path(path)
+        exif.clear()
+        exif.save_file(path)
+    elif mime_type == 'video/mp4':
+        video = MP4(path)
+        video.clear()
+        video.save()
+    elif mime_type == 'video/webm':
+        # XXX: Mutagen doesn't seem to support webm files
+        pass
 
 
 def upload_file(max_size=16777216):
@@ -1102,10 +1194,10 @@ def upload_file(max_size=16777216):
         extension = '.png'
     elif mtype == 'image/gif':
         extension = '.gif'
-    elif mtype == 'video/mp4':
-        extension = '.mp4'
-    elif mtype == 'video/webm':
-        extension = '.webm'
+    # elif mtype == 'video/mp4':
+    #     extension = '.mp4'
+    # elif mtype == 'video/webm':
+    #     extension = '.webm'
     else:
         return _("File type not allowed"), False
     ufile.seek(0)
@@ -1126,8 +1218,7 @@ def upload_file(max_size=16777216):
             os.remove(fpath)
             return _("File size exceeds the maximum allowed size (%(size)i MB)", size=max_size / 1024 / 1024), False
         # remove metadata
-        if mtype not in ('image/gif', 'video/mp4', 'video/webm'):  # Apparently we cannot write to gif images
-            clear_metadata(fpath)
+        clear_metadata(fpath, mtype)
     return f_name, True
 
 
@@ -1192,7 +1283,6 @@ def getSubData(sid, simple=False, extra=False):
 
         try:
             data['rules'] = SubRule.select().join(Sub).where(Sub.sid == sid)
-            print('RULES:', data['rules'])
         except SubRule.DoesNotExist:
             data['rules'] = ''
 
@@ -1257,7 +1347,7 @@ def validate_css(css, sid):
     # create a map for uris.
     uris = {}
     for su in SubUploads.select().where(SubUploads.sid == sid):
-        uris[su.name] = config.storage.uploads.url + su.fileid
+        uris[su.name] = file_url(su.fileid)
     for x in st:
         if x.__class__.__name__ == "AtRule":
             if x.at_keyword.lower() == "import":
@@ -1312,8 +1402,8 @@ def populate_feed(feed, posts):
         url = url_for('sub.view_post', sub=post['sub'], pid=post['pid'], _external=True)
 
         if post['thumbnail']:
-            content += '<td><a href=' + url + '"><img src="' + config.storage.thumbnails.url + post[
-                'thumbnail'] + '" alt="' + post['title'] + '"/></a></td>'
+            content += '<td><a href=' + url + '"><img src="' + thumbnail_url(post[
+                'thumbnail']) + '" alt="' + post['title'] + '"/></a></td>'
         content += '<td>Submitted by <a href=/u/' + post['user'] + '>' + post['user'] + '</a><br/>' + our_markdown(
             post['content'])
         if post['link']:
@@ -1354,6 +1444,7 @@ def metadata_to_dict(metadata):
 # Log types
 LOG_TYPE_USER = 10
 LOG_TYPE_USER_BAN = 19
+LOG_TYPE_USER_UNBAN = 54
 
 LOG_TYPE_SUB_CREATE = 20
 LOG_TYPE_SUB_SETTINGS = 21
@@ -1372,7 +1463,6 @@ LOG_TYPE_SUB_DELETE_COMMENT = 53
 
 LOG_TYPE_SUB_TRANSFER = 30
 
-LOG_TYPE_SUB_CREATION = 40
 LOG_TYPE_ANNOUNCEMENT = 41
 LOG_TYPE_DOMAIN_BAN = 42
 LOG_TYPE_DOMAIN_UNBAN = 43
@@ -1384,6 +1474,9 @@ LOG_TYPE_DISABLE_INVITE = 48
 LOG_TYPE_DISABLE_REGISTRATION = 49
 LOG_TYPE_ENABLE_REGISTRATION = 50
 
+LOG_TYPE_REPORT_CLOSE = 55
+LOG_TYPE_REPORT_REOPEN = 56
+LOG_TYPE_REPORT_CLOSE_RELATED = 57
 
 def create_sitelog(action, uid, comment='', link=''):
     SiteLog.create(action=action, uid=uid, desc=comment, link=link).save()
@@ -1393,6 +1486,17 @@ def create_sitelog(action, uid, comment='', link=''):
 def create_sublog(action, uid, sid, comment='', link='', admin=False, target=None):
     SubLog.create(action=action, uid=uid, sid=sid, desc=comment, link=link, admin=admin, target=target).save()
 
+
+# `id` is the report id
+def create_reportlog(action, uid, id, type='', related=False, original_report=''):
+    if type == 'post' and related == False:
+        PostReportLog.create(action=action, uid=uid, id=id).save()
+    elif type == 'comment' and related == False:
+        CommentReportLog.create(action=action, uid=uid, id=id).save()
+    elif type == 'post' and related == True:
+        PostReportLog.create(action=action, uid=uid, id=id, desc=original_report).save()
+    elif type == 'comment' and related == True:
+        CommentReportLog.create(action=action, uid=uid, id=id, desc=original_report).save()
 
 def is_domain_banned(link):
     bans = SiteMetadata.select().where(SiteMetadata.key == 'banned_domain')
@@ -1542,13 +1646,38 @@ def get_comment_tree(comments, root=None, only_after=None, uid=None, provide_con
 
     commdata = {}
     for comm in expcomms:
-        if comm['userstatus'] == 10 or comm['status']:
-            comm['user'] = '[Deleted]'
-            comm['uid'] = None
+        comm['visibility'] = ''
+        sub = Sub.select().join(SubPost).join(SubPostComment).where(SubPostComment.cid == comm['cid']).get()
 
         if comm['status']:
-            comm['content'] = ''
-            comm['lastedit'] = None
+            if comm['status'] == 1:
+                if current_user.is_admin():
+                    comm['visibility'] = 'admin-self-del'
+                elif current_user.is_mod(sub.sid, 1):
+                    comm['visibility'] = 'mod-self-del'
+                else:
+                    comm['user'] = _('[Deleted]')
+                    comm['uid'] = None
+                    comm['content'] = ''
+                    comm['lastedit'] = None
+                    comm['visibility'] = 'none'
+            elif comm['status'] == 2:
+                if current_user.is_admin() or current_user.is_mod(sub.sid, 1):
+                    comm['visibility'] = 'mod-del'
+                else:
+                    comm['user'] = _('[Deleted]')
+                    comm['uid'] = None
+                    comm['content'] = ''
+                    comm['lastedit'] = None
+                    comm['visibility'] = 'none'
+
+        if comm['userstatus'] == 10:
+            comm['user'] = _('[Deleted]')
+            comm['uid'] = None
+            if comm['status'] == 1:
+                comm['content'] = ''
+                comm['lastedit'] = None
+                comm['visibility'] = 'none'
         # del comm['userstatus']
         commdata[comm['cid']] = comm
 
@@ -1590,6 +1719,12 @@ def get_messages(mtype, read=False, uid=None):
 @cache.memoize(1)
 def get_unread_count(mtype):
     return get_messages(mtype, True).count()
+
+
+@cache.memoize(1)
+def get_notif_count():
+    """ Temporary till we get rid of the old template """
+    return Notification.select().where((Notification.target == current_user.uid) & Notification.read.is_null(True)).count()
 
 
 def cast_vote(uid, target_type, pcid, value):
@@ -1748,6 +1883,9 @@ def getReports(view, status, page, *args, **kwargs):
     # view = STR either 'mod' or 'admin'
     # status = STR: 'open', 'closed', or 'all'
     sid = kwargs.get('sid', None)
+    type = kwargs.get('type', None)
+    report_id = kwargs.get('report_id', None)
+    related = kwargs.get('related', None)
 
     # Get Subs for which user is Mod
     mod_subs = getModSubs(current_user.uid, 1)
@@ -1768,13 +1906,18 @@ def getReports(view, status, page, *args, **kwargs):
     ).join(User, on=User.uid == SubPostReport.uid) \
         .switch(SubPostReport)
 
-    # filter by if Mod or Admin view and if SID
+    # filter by if Mod or Admin view and if filtering by sub, specific post, or related posts
     if ((view == 'admin') and not sid):
         sub_post_reports = all_post_reports.where(SubPostReport.send_to_admin == True).join(SubPost).join(Sub).join(SubMod)
     elif ((view == 'admin') and sid):
         sub_post_reports = all_post_reports.where(SubPostReport.send_to_admin == True).join(SubPost).join(Sub).where(Sub.sid == sid).join(SubMod)
     elif ((view == 'mod') and sid):
         sub_post_reports = all_post_reports.join(SubPost).join(Sub).where(Sub.sid == sid).join(SubMod).where(SubMod.user == current_user.uid)
+    elif ((report_id) and (type == 'post') and (related != True)):
+        sub_post_reports = all_post_reports.where(SubPostReport.id == report_id).join(SubPost).join(Sub).join(SubMod)
+    elif ((report_id) and (type == 'post') and (related == True)):
+        base_report = getReports('mod', 'all', 1, type='post', report_id=report_id, related=False)
+        sub_post_reports = all_post_reports.where(SubPostReport.pid == base_report['pid']).join(SubPost).join(Sub).join(SubMod)
     else:
         sub_post_reports = all_post_reports.join(SubPost).join(Sub).join(SubMod).where(SubMod.user == current_user.uid)
 
@@ -1800,14 +1943,18 @@ def getReports(view, status, page, *args, **kwargs):
      ).join(User, on=User.uid == SubPostCommentReport.uid) \
          .switch(SubPostCommentReport)
 
-
-    # filter by if Mod or Admin view and if SID
+    # filter by if Mod or Admin view and if filtering by sub or specific post
     if ((view == 'admin') and not sid):
         sub_comment_reports = all_comment_reports.where(SubPostCommentReport.send_to_admin == True).join(SubPostComment).join(SubPost).join(Sub).join(SubMod)
     elif ((view == 'admin') and sid):
         sub_comment_reports = all_comment_reports.where(SubPostCommentReport.send_to_admin == True).join(SubPostComment).join(SubPost).join(Sub).where(Sub.sid == sid).join(SubMod)
     elif ((view == 'mod') and sid):
         sub_comment_reports = all_comment_reports.join(SubPostComment).join(SubPost).join(Sub).where(Sub.sid == sid).join(SubMod).where(SubMod.user == current_user.uid)
+    elif ((report_id) and (type == 'comment') and (related != True)):
+        sub_comment_reports = all_comment_reports.where(SubPostCommentReport.id == report_id).join(SubPostComment).join(SubPost).join(Sub).join(SubMod)
+    elif ((report_id) and (type == 'comment') and (related == True)):
+        base_report = getReports('mod', 'all', 1, type='comment', report_id=report_id, related=False)
+        sub_comment_reports = all_comment_reports.where(SubPostCommentReport.cid == base_report['cid']).join(SubPostComment).join(SubPost).join(Sub).join(SubMod)
     else:
         sub_comment_reports = all_comment_reports.join(SubPostComment).join(SubPost).join(Sub).join(SubMod).where(SubMod.user == current_user.uid)
 
@@ -1817,12 +1964,21 @@ def getReports(view, status, page, *args, **kwargs):
     open_sub_comment_reports = sub_comment_reports.where(SubPostCommentReport.open == True)
     closed_sub_comment_reports = sub_comment_reports.where(SubPostCommentReport.open == False)
 
-    # Define open and closed queries and counts
-    open_query = open_sub_post_reports | open_sub_comment_reports
-    closed_query = closed_sub_post_reports | closed_sub_post_reports
+    # Define open and closed queries and counts depending on whether query is for specific post
+    if ((report_id) and (type == 'post')):
+        open_query = open_sub_post_reports
+        closed_query = closed_sub_post_reports
+    elif((report_id) and (type == 'comment')):
+        open_query = open_sub_comment_reports
+        closed_query = closed_sub_comment_reports
+    else:
+        open_query = open_sub_post_reports | open_sub_comment_reports
+        closed_query = closed_sub_post_reports | closed_sub_comment_reports
+
     open_report_count = open_query.count()
     closed_report_count = closed_query.count()
 
+    # Order and paginate queries
     if (status == 'open'):
         query = open_query.order_by(open_query.c.datetime.desc())
         query = query.paginate(page, 50)
@@ -1835,5 +1991,9 @@ def getReports(view, status, page, *args, **kwargs):
         query = query.paginate(page, 50)
     else:
         return jsonify(msg=_('Invalid status request')), 400
+
+    if (report_id and type and not related):
+        # If only getting one report, this is a more usable format
+        return list(query.dicts())[0]
 
     return {'query': list(query.dicts()), 'open_report_count': str(open_report_count), 'closed_report_count': str(closed_report_count)}

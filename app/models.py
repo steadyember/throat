@@ -75,7 +75,7 @@ class User(BaseModel):
 
     score = IntegerField(default=0)  # AKA phuks taken
     given = IntegerField(default=0)  # AKA phuks given
-    # status: 0 = OK; 10 = deleted
+    # status: 0 = OK; 10 = deleted; 5 = site-ban
     status = IntegerField(default=0)
     resets = IntegerField(default=0)
 
@@ -118,30 +118,6 @@ class Grant(BaseModel):
 
     class Meta:
         table_name = 'grant'
-
-
-class Message(BaseModel):
-    content = TextField(null=True)
-    mid = PrimaryKeyField()
-    mlink = CharField(null=True)
-    # mtype values:
-    # 1: sent, 4: post replies, 5: comment replies, 8: mentions, 9: saved message
-    # 6: deleted, 41: ignored messages  => won't display anywhere
-    # 2 (mod invite), 7 (ban notification), 11 (deletion): modmail
-    mtype = IntegerField(null=True)
-    posted = DateTimeField(null=True)
-    read = DateTimeField(null=True)
-    receivedby = ForeignKeyField(db_column='receivedby', null=True,
-                                 model=User, field='uid')
-    sentby = ForeignKeyField(db_column='sentby', null=True, model=User,
-                             backref='user_sentby_set', field='uid')
-    subject = CharField(null=True)
-
-    def __repr__(self):
-        return f'<Message "{self.subject[:20]}"'
-
-    class Meta:
-        table_name = 'message'
 
 
 class SiteLog(BaseModel):
@@ -196,7 +172,7 @@ class Sub(BaseModel):
         try:
             m = SubMetadata.get((SubMetadata.sid == self.sid) & (SubMetadata.key == key))
             return m.value
-        except SubMetadata.DoesNotEXist:
+        except SubMetadata.DoesNotExist:
             return None
 
     def update_metadata(self, key, value):
@@ -270,7 +246,7 @@ class SubMetadata(BaseModel):
 
 class SubPost(BaseModel):
     content = TextField(null=True)
-    deleted = IntegerField(null=True)
+    deleted = IntegerField(null=True) # 1=self delete, 2=mod delete, 0=not deleted
     link = CharField(null=True)
     nsfw = BooleanField(null=True)
     pid = PrimaryKeyField()
@@ -332,7 +308,7 @@ class SubPostComment(BaseModel):
     score = IntegerField(null=True)
     upvotes = IntegerField(default=0)
     downvotes = IntegerField(default=0)
-    status = IntegerField(null=True)
+    status = IntegerField(null=True) # 1=self delete, 2=mod delete, 0 or null=not deleted
     time = DateTimeField(null=True)
     uid = ForeignKeyField(db_column='uid', null=True, model=User,
                           field='uid', backref='comments')
@@ -511,6 +487,23 @@ class SubPostReport(BaseModel):
         table_name = 'sub_post_report'
 
 
+class PostReportLog(BaseModel):
+    rid = ForeignKeyField(db_column='id', model=SubPostReport, field='id')
+    action = IntegerField(null=True)
+    desc = CharField(null=True)
+    lid = PrimaryKeyField()
+    link = CharField(null=True)
+    time = DateTimeField(default=datetime.datetime.utcnow)
+    uid = ForeignKeyField(db_column='uid', null=True, model=User, field='uid')
+    target = ForeignKeyField(db_column='target_uid', null=True, model=User, field='uid')
+
+    def __repr__(self):
+        return f'<CommentReportLog action={self.action}>'
+
+    class Meta:
+        table_name = 'comment_report_log'
+
+
 class SubPostCommentReport(BaseModel):
     cid = ForeignKeyField(db_column='cid', model=SubPostComment, field='cid')
     uid = ForeignKeyField(db_column='uid', model=User, field='uid')
@@ -524,6 +517,23 @@ class SubPostCommentReport(BaseModel):
 
     class Meta:
         table_name = 'sub_post_comment_report'
+
+
+class CommentReportLog(BaseModel):
+    rid = ForeignKeyField(db_column='id', model=SubPostCommentReport, field='id')
+    action = IntegerField(null=True)
+    desc = CharField(null=True)
+    lid = PrimaryKeyField()
+    link = CharField(null=True)
+    time = DateTimeField(default=datetime.datetime.utcnow)
+    uid = ForeignKeyField(db_column='uid', null=True, model=User, field='uid')
+    target = ForeignKeyField(db_column='target_uid', null=True, model=User, field='uid')
+
+    def __repr__(self):
+        return f'<CommentReportLog action={self.action}>'
+
+    class Meta:
+        table_name = 'comment_report_log'
 
 
 class SubPostCommentHistory(BaseModel):
@@ -628,3 +638,67 @@ class InviteCode(BaseModel):
 
     class Meta:
         table_name = "invite_code"
+
+
+class Wiki(BaseModel):
+    is_global = BooleanField()
+    sub = ForeignKeyField(db_column='sid', model=Sub, field='sid', null=True)
+
+    slug = CharField(max_length=128)
+    title = CharField(max_length=255)
+    content = TextField()
+
+    created = DateTimeField(default=datetime.datetime.utcnow)
+    updated = DateTimeField(default=datetime.datetime.utcnow)
+
+
+class Notification(BaseModel):
+    """ Holds user notifications. """
+    # Notification type. Can be one of:
+    # - POST_REPLY
+    # - COMMENT_REPLY
+    # - MENTION
+    # - MOD_INVITE
+    type = CharField()
+
+    sub = ForeignKeyField(db_column='sid', model=Sub, field='sid', null=True)
+    # Post the notification is referencing, if it applies
+    post = ForeignKeyField(db_column='pid', model=SubPost, field='pid', null=True)
+    # Comment the notification is referring, if it applies
+    comment = ForeignKeyField(db_column='cid', model=SubPostComment, field='cid', null=True)
+    # User that triggered the action. If null the action is triggered by the system
+    sender = ForeignKeyField(db_column='sentby', model=User, field='uid', null=True)
+
+    target = ForeignKeyField(db_column='receivedby', model=User, field='uid', null=True)
+    read = DateTimeField(null=True)
+    # For future custom text notifications sent by admins (badge notifications?)015_notifications
+    content = TextField(null=True)
+
+    created = DateTimeField(default=datetime.datetime.utcnow)
+
+    def __repr__(self):
+        return f'<Notification target="{self.user}" type="{self.type}" >'
+
+
+class Message(BaseModel):
+    mid = PrimaryKeyField()
+    content = TextField(null=True)
+    mlink = CharField(null=True)
+    # mtype values:
+    # 1: sent, 4: post replies, 5: comment replies, 8: mentions, 9: saved message
+    # 6: deleted, 41: ignored messages  => won't display anywhere
+    # 2 (mod invite), 7 (ban notification), 11 (deletion): modmail
+    mtype = IntegerField(null=True)
+    posted = DateTimeField(null=True)
+    read = DateTimeField(null=True)
+    receivedby = ForeignKeyField(db_column='receivedby', null=True,
+                                 model=User, field='uid')
+    sentby = ForeignKeyField(db_column='sentby', null=True, model=User,
+                             backref='user_sentby_set', field='uid')
+    subject = CharField(null=True)
+
+    def __repr__(self):
+        return f'<Message "{self.subject[:20]}"'
+
+    class Meta:
+        table_name = 'message'

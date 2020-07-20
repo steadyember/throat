@@ -26,9 +26,9 @@ from .views.mod import bp as mod
 from .views.errors import bp as errors
 from .views.messages import bp as messages
 
-from . import misc, forms, caching
+from . import misc, forms, caching, storage
 from .socketio import socketio
-from .misc import SiteAnon, engine, engine_init_app, re_amention, talisman
+from .misc import SiteAnon, engine, engine_init_app, re_amention, mail, talisman
 
 # /!\ FOR DEBUGGING ONLY /!\
 # from werkzeug.contrib.profiler import ProfilerMiddleware
@@ -37,7 +37,7 @@ webpack = Webpack()
 babel = Babel()
 login_manager = LoginManager()
 login_manager.anonymous_user = SiteAnon
-login_manager.login_view = 'login'
+login_manager.login_view = 'auth.login'
 
 
 def create_app(config=Config('config.yaml')):
@@ -46,6 +46,9 @@ def create_app(config=Config('config.yaml')):
     app.config['THROAT_CONFIG'] = config
     app.config.update(config.get_flask_dict())
     app.config['WEBPACK_MANIFEST_PATH'] = 'manifest.json'
+
+    if 'STORAGE_ALLOWED_EXTENSIONS' not in app.config:
+        app.config['STORAGE_ALLOWED_EXTENSIONS'] = storage.allowed_extensions
 
     app.config['SESSION_COOKIE_SECURE'] = True
 
@@ -74,6 +77,9 @@ def create_app(config=Config('config.yaml')):
     db_init_app(app)
     re_amention.init_app(app)
     engine_init_app(app)
+    if 'MAIL_SERVER' in app.config:
+        mail.init_app(app)
+    storage.storage_init_app(app)
     # app.wsgi_app = ProfilerMiddleware(app.wsgi_app)
 
     app.register_blueprint(home)
@@ -90,11 +96,14 @@ def create_app(config=Config('config.yaml')):
     app.register_blueprint(admin, url_prefix='/admin')
     app.register_blueprint(mod, url_prefix='/mod')
 
+    app.add_template_global(storage.file_url)
+    app.add_template_global(storage.thumbnail_url)
     engine.global_vars.update({'current_user': current_user, 'request': request, 'config': config, 'conf': app.config,
                                'url_for': url_for, 'asset_url_for': webpack.asset_url_for, 'func': misc,
                                'form': forms, 'hostname': socket.gethostname(), 'datetime': datetime,
                                'e': escape_html, 'markdown': misc.our_markdown, '_': _, 'get_locale': get_locale,
-                               'BeautifulSoup': BeautifulSoup, 'csp_nonce': app.jinja_env.globals['csp_nonce']})
+                               'BeautifulSoup': BeautifulSoup, 'csp_nonce': app.jinja_env.globals['csp_nonce'],
+                               'thumbnail_url': storage.thumbnail_url, 'file_url': storage.file_url})
 
     if config.app.development:
         import logging
