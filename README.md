@@ -76,7 +76,6 @@ authentication servers (instead of the defaults, which are sqlite and
 local authentication), you may put configuration settings in
 `test_config.yaml` and run the tests with
 `TEST_CONFIG=test_config.yaml python -m pytest`
->>>>>>> upstream/master
 
 ## Chat
 

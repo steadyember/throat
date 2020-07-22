@@ -180,9 +180,7 @@
     @{chat()!!html}
   @end
   <script type="text/javascript" src="@{ asset_url_for('main.js') }"></script>
-  @if current_user.get_global_stylesheet():
-    <style nonce="@{csp_nonce()}">@{current_user.get_global_stylesheet()}</style>
-  @end
+  <style>@{current_user.get_global_stylesheet()}</style>
   @def pagefoot():
   @end
   @{pagefoot()!!html}

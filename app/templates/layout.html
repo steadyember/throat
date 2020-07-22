@@ -169,9 +169,7 @@
     {% endblock %}
   </div>
   <script type="text/javascript" src="{{ asset_url_for('main.js') }}"></script>
-  {% if current_user.get_global_stylesheet() %}
-    <style nonce="{{csp_nonce()}}">{{current_user.get_global_stylesheet()|safe}}</style>
-  {% endif %}
+  <style>{{current_user.get_global_stylesheet()|safe}}</style>
   {%block pagefoot%}{%endblock%}
 </body>
 </html>

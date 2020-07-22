@@ -11,7 +11,6 @@ flask-caching
 flask-redis
 flask-talisman
 flask-cloudy
-flask-talisman
 bcrypt
 misaka>=2.1.1
 peewee
