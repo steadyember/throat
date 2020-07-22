@@ -4,6 +4,9 @@ EXPOSE 5000
 
 WORKDIR /throat
 
+ENV NODE_ENV=production
+ENV PATH=/throat/node_modules/.bin/:$PATH
+
 COPY requirements.txt package.json package-lock.json* ./
 
 RUN \
