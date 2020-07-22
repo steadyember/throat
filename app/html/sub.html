@@ -48,8 +48,7 @@
 @end
 
 @def pagefoot():
-
-  @if not current_user.block_styles():
-    <style>@{subInfo['stylesheet']!!html}</style>
+  @if not current_user.block_styles() and subInfo['stylesheet']:
+    <style nonce="@{csp_nonce()}">@{subInfo['stylesheet']!!html}</style>
   @end
 @end

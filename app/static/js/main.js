@@ -507,7 +507,6 @@ u.ready(function () {
   })
 })
 
-
 window.onbeforeunload = function (e) {
   var flag = false;
 

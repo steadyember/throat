@@ -1,11 +1,6 @@
-.PHONY: docker-compose-build
-docker-compose-build:
-	docker-compose build
-	@$(DONE)
-
 .PHONY: up
-up: docker-compose-build
-	docker-compose up --remove-orphans -d
+up:
+	docker-compose up --build --remove-orphans -d
 	@$(DONE)
 
 .PHONY: down
@@ -14,6 +9,6 @@ down:
 	@$(DONE)
 
 .PHONY: docker-shell
-docker-shell: docker-compose-build
+docker-shell:
 	docker-compose run --rm throat /bin/bash
 	@$(DONE)

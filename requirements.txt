@@ -9,6 +9,7 @@ Flask-SocketIO>=3.3.2
 Flask-Webpack>=0.1.0
 flask-caching
 flask-redis
+flask-talisman
 flask-cloudy
 flask-talisman
 bcrypt

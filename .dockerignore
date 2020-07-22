@@ -9,6 +9,7 @@
 !babel.cfg
 !package.json
 !package-lock.json
+!phuks.txt
 !requirements.txt
 !throat.py
 !webpack.config.js

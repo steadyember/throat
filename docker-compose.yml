@@ -1,7 +1,9 @@
-version: "3.5"
+version: "2.4"
 services:
   db:
     image: postgres
+    volumes:
+      - db:/var/lib/postgresql/data
     environment:
       POSTGRES_USER: throat
       POSTGRES_PASSWORD: dev
@@ -18,7 +20,7 @@ services:
     stdin_open: true
     tty: true
     volumes:
-      - .:/throat
+      - .:/throat:delegated
     environment:
       # Configs set here will override your config.yaml
       APP_HOST: 0.0.0.0
@@ -31,6 +33,7 @@ services:
       DATABASE_PASSWORD: dev
       DATABASE_NAME: throat
       DATABASE_AUTOCOMMIT: "true"
+      NODE_ENV: development
     ports:
       - "5000:5000"
     depends_on:
@@ -52,3 +55,6 @@ services:
     depends_on:
       - db
     restart: on-failure
+
+volumes:
+  db:

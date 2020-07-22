@@ -31,6 +31,11 @@ If you prefer to develop on docker
  - In addition, configs are overridden by environment variables set in docker-compose.yml
    which reference the redis and postgres services created by docker-compose.
 
+During development w/ docker-compose, your directory will be bind-mounted into the docker container. This requires
+that the node modules and webpack manifest in your current working directory need to be built witih/for the container
+OS and not your host OS. Istead of running `npm install` directly, use `docker-compose run throat npm install` and
+`docker-compose run throat npm run build`.
+
 `make up` will bring the containerized site up and mount your current working directory
 inside the container for dev. It also runs the migrations on start-up. `make down` will spin down the containerized services.
 

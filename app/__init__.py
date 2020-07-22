@@ -56,6 +56,8 @@ def create_app(config=Config('config.yaml')):
     if 'STORAGE_ALLOWED_EXTENSIONS' not in app.config:
         app.config['STORAGE_ALLOWED_EXTENSIONS'] = storage.allowed_extensions
 
+    app.config['SESSION_COOKIE_SECURE'] = True
+
     # For flask-login, securely handle the "Remember me" cookie.
     app.config['REMEMBER_COOKIE_HTTPONLY'] = True
     app.config['REMEMBER_COOKIE_SECURE'] = not app.config['DEBUG']
