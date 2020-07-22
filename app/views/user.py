@@ -1,14 +1,17 @@
 """ Profile and settings endpoints """
 import time
 from peewee import fn, JOIN
-from flask import Blueprint, render_template, abort, redirect, url_for
+from flask import Blueprint, render_template, abort, redirect, url_for, flash
 from flask_login import login_required, current_user
 from flask_babel import _, Locale
+from .do import uid_from_recovery_token, info_from_email_confirmation_token
 from .. import misc, config
-from ..misc import engine
-from ..forms import EditUserForm, CreateUserMessageForm, ChangePasswordForm, DeleteAccountForm, PasswordRecoveryForm
+from ..auth import auth_provider, email_validation_is_required
+from ..misc import engine, send_email
+from ..forms import EditUserForm, CreateUserMessageForm, EditAccountForm, DeleteAccountForm, PasswordRecoveryForm
 from ..forms import PasswordResetForm
-from ..models import User, Sub, SubMod, SubPost, SubPostComment, UserSaved, InviteCode, UserMetadata
+from ..models import User, UserStatus, UserMetadata
+from ..models import Sub, SubMod, SubPost, SubPostComment, UserSaved, InviteCode
 
 bp = Blueprint('user', __name__)
 
@@ -28,6 +31,7 @@ def view(user):
         (SubMod.uid == user.uid) & (SubMod.invite == False))
     owns = [x.sub.name for x in modsquery if x.power_level == 0]
     mods = [x.sub.name for x in modsquery if 1 <= x.power_level <= 2]
+    invitecodeinfo = misc.getInviteCodeInfo(user.uid)
     badges = misc.getUserBadges(user.uid)
     pcount = SubPost.select().where(SubPost.uid == user.uid).count()
     ccount = SubPostComment.select().where(SubPostComment.uid == user.uid).count()
@@ -51,11 +55,8 @@ def view(user):
 
     return engine.get_template('user/profile.html').render(
         {'user': user, 'level': level, 'progress': progress, 'postCount': pcount, 'commentCount': ccount,
-         'givenScore': givenScore, 'badges': badges, 'owns': owns, 'mods': mods, 'habits': habit,
+         'givenScore': givenScore, 'invitecodeinfo': invitecodeinfo, 'badges': badges, 'owns': owns, 'mods': mods, 'habits': habit,
          'msgform': CreateUserMessageForm()})
-    # return render_template('../html/user/profile.html', user=user, badges=badges, habit=habit,
-    #                        msgform=CreateUserMessageForm(), pcount=pcount,
-    #                        ccount=ccount, owns=owns, mods=mods, level=level, progress=progress)
 
 
 @bp.route("/u/<user>/posts", defaults={'page': 1})
@@ -153,10 +154,29 @@ def edit_user():
     return engine.get_template('user/settings/preferences.html').render({'edituserform': form, 'user': User.get(User.uid == current_user.uid)})
 
 
-@bp.route("/settings/password")
+@bp.route("/settings/account")
 @login_required
-def edit_password():
-    return engine.get_template('user/settings/password.html').render({'form': ChangePasswordForm(), 'user': User.get(User.uid == current_user.uid)})
+def edit_account():
+    return engine.get_template('user/settings/account.html').render(
+        {'form': EditAccountForm(),
+         'user': User.get(User.uid == current_user.uid)})
+
+
+@bp.route('/settings/account/confirm-email/<token>')
+def confirm_email_change(token):
+    info = info_from_email_confirmation_token(token)
+    user = None
+    try:
+        user = User.get(User.uid == info['uid'])
+    except (TypeError, User.DoesNotExist):
+        flash(_('The link you used is invalid or has expired'), 'error')
+        return redirect(url_for('user.edit_account'))
+
+    if user.status == UserStatus.OK:
+        auth_provider.confirm_pending_email(user, info['email'])
+        flash(_('Your password recovery email address is now confirmed!'), 'message')
+        return redirect(url_for('user.edit_account'))
+    return redirect(url_for('home.index'))
 
 
 @bp.route("/settings/delete")
@@ -175,31 +195,20 @@ def password_recovery():
     return engine.get_template('user/password_recovery.html').render({'lpform': form})
 
 
-@bp.route('/reset/<uid>/<key>')
-def password_reset(uid, key):
+@bp.route('/reset/<token>')
+def password_reset(token):
     """ The page that actually resets the password """
+    user = None
     try:
-        user = User.get(User.uid == uid)
+        user = User.get(User.uid == uid_from_recovery_token(token))
     except User.DoesNotExist:
-        return abort(404)
-
-    try:
-        key = UserMetadata.get(
-            (UserMetadata.uid == user.uid) & (UserMetadata.key == 'recovery-key') & (UserMetadata.value == key))
-        keyExp = UserMetadata.get((UserMetadata.uid == user.uid) & (UserMetadata.key == 'recovery-key-time'))
-        expiration = float(keyExp.value)
-        if (time.time() - expiration) > 86400:  # 1 day
-            # Key is old. remove it and proceed
-            key.delete_instance()
-            keyExp.delete_instance()
-            abort(404)
-    except UserMetadata.DoesNotExist:
-        return abort(404)
+        pass
+    if user == None or user.status != UserStatus.OK:
+        flash(_('Password reset link was invalid or expired'), 'error')
+        return redirect(url_for('user.password_recovery'))
 
     if current_user.is_authenticated:
-        key.delete_instance()
-        keyExp.delete_instance()
         return redirect(url_for('home.index'))
 
-    form = PasswordResetForm(key=key.value, user=user.uid)
+    form = PasswordResetForm(key=token, user=user.uid)
     return engine.get_template('user/password_reset.html').render({'lpform': form})

@@ -4,6 +4,8 @@ COPY requirements.txt /requirements.txt
 COPY package.json /package.json
 COPY package-lock.json /package-lock.json
 
+RUN useradd -ms /bin/bash app
+
 RUN \
   apt-get update && apt-get install -yqq \
      build-essential \
@@ -25,6 +27,12 @@ COPY . /throat
 WORKDIR /throat
 RUN mv ../node_modules node_modules && npm run build
 
+RUN \
+  mv ../node_modules node_modules \
+  && npm run build \
+  && chown -R app:app .
+
+USER app
 EXPOSE 5000
 
 CMD ["./throat.py"]

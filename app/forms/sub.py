@@ -34,6 +34,12 @@ class DeleteCommentForm(FlaskForm):
     reason = StringField()
 
 
+class UndeleteCommentForm(FlaskForm):
+    """ Un-deletes a comment in a post """
+    cid = HiddenField()  # comment id
+    reason = StringField()
+
+
 class EditCommentForm(FlaskForm):
     """ Edits a comment in a post """
     cid = HiddenField()  # comment id
@@ -57,6 +63,22 @@ class DeleteSubFlair(FlaskForm):
     flair = HiddenField()
 
 
+class CreateSubRule(FlaskForm):
+    """ Creates a rule """
+    text = StringField(_l('Rule text'), validators=[DataRequired(), Length(max=25)])
+
+
+class EditSubRule(FlaskForm):
+    """ Edits ONE rule from a sub """
+    rule = HiddenField()
+    text = StringField(_l('Rule text'), validators=[DataRequired(), Length(max=22)])
+
+
+class DeleteSubRule(FlaskForm):
+    """ Used to delete rules """
+    rule = HiddenField()
+
+
 class EditSubForm(FlaskForm):
     """ Edit sub form. """
     title = StringField(_l('Title'),
@@ -65,13 +87,13 @@ class EditSubForm(FlaskForm):
     nsfw = BooleanField(_l('Sub is NSFW'))
     restricted = BooleanField(_l('Only mods can post'))
     usercanflair = BooleanField(_l('Allow users to flair their own posts'))
-    videomode = BooleanField(_l('Enable video player (youtube links only)'))
     polling = BooleanField(_l('Enable polls'))
     subsort = RadioField(_l('Default sub page post sorting'),
                          choices=[('v', 'Hot'), ('v_two', 'New'),
                                   ('v_three', 'Top')],
                          validators=[Optional()])
     sidebar = TextAreaField(_l('Sidebar text'), validators=[Length(max=8000)])
+    sublogprivate = BooleanField(_l('Make the sub log private'))
 
 
 class EditMod2Form(FlaskForm):
@@ -133,6 +155,13 @@ class EditPostFlair(FlaskForm):
 
 
 class DeletePost(FlaskForm):
+    """ Post deletion form. """
+    post = HiddenField()
+    reason = StringField()
+    send_to_admin = BooleanField()
+
+
+class UndeletePost(FlaskForm):
     """ Post deletion form. """
     post = HiddenField()
     reason = StringField()

@@ -30,6 +30,7 @@ require('./Editor');
 require('./Messages');
 require('./Sub');
 require('./Poll');
+require('./Mod');
 var socket = require('./Socket');
 
 function vote(obj, how, comment){
@@ -38,7 +39,7 @@ function vote(obj, how, comment){
     // Show popover
     var modal = new Tingle.modal({
     });
-  
+
     // set content
     modal.setContent('<h1>' + _('Log in or register to continue') + '</h1>\
     <div class="pure-g"> \
@@ -72,11 +73,11 @@ function vote(obj, how, comment){
       </div> \
     </div> \
     ');
-  
-  
+
+
     // open modal
     modal.open();
-  
+
     return;
   }
   if(comment){
@@ -173,7 +174,7 @@ u.ready(function() {
   if(list){
     new window.Sortable(list, {
       animation: 100,
-    }); 
+    });
   }
 
   u.sub('.save-top_bar', 'click', function(e){
@@ -186,7 +187,7 @@ u.ready(function() {
     });
     u.post('/do/edit_top_bar', {sids: subs}, function(d){
       if (d.status == "ok") {
-        
+
       }else{
         alert(_('There was an error while saving your settings. Please try again in a few minutes.'));
       }
@@ -218,13 +219,31 @@ u.ready(function() {
           if(Array.isArray(data.error)){
             error = data.error[0];
           }
-
           if(target.querySelector('.div-error')){
             target.querySelector('.div-error').innerHTML = error;
             target.querySelector('.div-error').style.display = 'block';
           }
+          if(target.querySelector('.div-message')){
+            target.querySelector('.div-message').style.display = 'none';
+          }
           button.innerHTML = btnorm;
         } else { // success
+          let message = data.message;
+          if(Array.isArray(data.message)){
+            message = data.message[0];
+          }
+          if(target.querySelector('.div-message')){
+            target.querySelector('.div-message').innerHTML = message;
+            if (message) {
+                target.querySelector('.div-message').style.display = 'block';
+            } else {
+                target.querySelector('.div-message').style.display = 'none';
+            }
+          }
+          if(target.querySelector('.div-error')){
+            target.querySelector('.div-error').style.display = 'none';
+          }
+
           if(target.getAttribute('data-reset')){
             target.reset();
           }
@@ -448,10 +467,50 @@ new Konami(function() {
     document.querySelector('#toggledark span').innerHTML = icons.sun;
 });
 
+u.ready(function () {
+  if (document.getElementById("throat-chat")) {
+    window.chat = "true";
+  }
+
+  if (document.getElementById("pagefoot-oindex")) {
+    window.oindex = "true";
+  }
+
+  if (document.getElementById("pagefoot-labrat")) {
+    window.labrat = true;
+    window.blocked = document.getElementById("pagefoot-blocked");
+    if (window.blocked) {
+      console.log("Blocked=", window.blocked)
+      window.nposts = '/all/new';
+    }
+    window.moreuri = document.getElementById("pagefoot-moreuri");
+  }
+
+  u.addEventForChild(document, 'click', '#btn-sending', function(e, target) {
+    window.sending = true;
+  })
+
+  u.addEventForChild(document, 'click', '#banuser-button', function(e, target) {
+    if (confirm(_('Are you sure you want to ban this user?'))) {
+      document.getElementById('banuser').submit();
+    }
+  })
+  u.addEventForChild(document, 'click', '#wipevotes-button', function(e, target) {
+    if (confirm(_('Are you sure you want to remove all the votes issued by this user?'))) {
+      document.getElementById('wipevotes').submit();
+    }
+  })
+  u.addEventForChild(document, 'click', '#unbanuser-button', function(e, target) {
+    if (confirm(_('Are you sure you want to unban this user?'))) {
+      document.getElementById('unbanuser').submit();
+    }
+  })
+})
+
 
 window.onbeforeunload = function (e) {
   var flag = false;
-  
+
   u.each('.exalert', function(e){
     if(e.value !== ''){
       flag = true;

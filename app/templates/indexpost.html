@@ -1,7 +1,7 @@
 <div pid="{{post.pid}}" class="{% if post.deleted != 0 %}deletedpost {% endif %}post">
     <div class="misctainer">
       <div class="votebuttons">
-        {% if post.userstatus != 10 and (datetime.datetime.utcnow() - post.posted.replace(tzinfo=None)) < datetime.timedelta(days=60) %}
+        {% if post.userstatus != 10 and (datetime.datetime.utcnow() - post.posted.replace(tzinfo=None)) < datetime.timedelta(days=config.site.archive_post_after) %}
         <div title="Upvote" class="upvote{%if post.positive == 1%} upvoted{%endif%}" data-pid="{{post.pid}}" data-icon="upvote"></div>
         <div class="score">{{post.score}}</div>
         <div title="Downvote" class="downvote{%if post.positive == 0%} downvoted{%endif%}" data-pid="{{post.pid}}" data-icon="downvote"></div>
@@ -11,7 +11,7 @@
         <a href="{{url_for('sub.view_post', sub=post.sub, pid=post.pid)}}" class="title">
           <div class="thumbnail">
             {% if post.thumbnail != '' and post.link != None %}
-              <img src="{{config.storage.thumbnails.url}}{{post.thumbnail}}"/>
+              <img src="{{thumbnail_url(post.thumbnail)}}"/>
             {% elif post.link != None %}
               <span class="placeholder" data-icon="link"></span>
             {%else%}
@@ -37,7 +37,7 @@
       </div>
       <div class="author">
           {% if post.link %}
-            {% if func.getDomain(post.link) in ('www.hooktube.com', 'hooktube.com', 'youtube.com', 'www.youtube.com', 'youtu.be', 'gfycat.com', 'vimeo.com', 'vine.co') %}
+            {% if func.getDomain(post.link) in config.site.expando_sites %}
             <div class="expando" data-pid="{{post.pid}}" data-t="lnk" data-link="{{post.link}}"><div class="icon expando-btn" data-icon="play"></div></div>
             {% elif func.isImage(post.link) %}
             <div class="expando" data-pid="{{post.pid}}" data-t="lnk" data-link="{{post.link}}"><div class="icon expando-btn" data-icon="image"></div></div>

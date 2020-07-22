@@ -4,16 +4,16 @@ import datetime
 import uuid
 import re
 import requests
-import bcrypt
 from bs4 import BeautifulSoup
 from flask import Blueprint, jsonify, request, url_for
 from peewee import JOIN, fn
 from flask_jwt_extended import JWTManager, jwt_required, create_access_token, create_refresh_token, get_jwt_identity
 from flask_jwt_extended import jwt_refresh_token_required, jwt_optional
 from .. import misc
+from ..auth import auth_provider
 from ..socketio import socketio
 from ..models import Sub, User, SubPost, SubPostComment, SubMetadata, SubPostCommentVote, SubPostVote, SubSubscriber
-from ..models import SiteMetadata, UserMetadata, Message
+from ..models import SiteMetadata, UserMetadata, Message, SubRule, Notification
 from ..caching import cache
 
 API = Blueprint('apiv3', __name__)
@@ -46,17 +46,12 @@ def login():
         user = User.get(fn.Lower(User.name) == username.lower())
     except User.DoesNotExist:
         return jsonify(msg="Bad username or password"), 401
-    
+
     if user.status != 0:
         return jsonify(msg="Forbidden"), 403
 
-    if user.crypto == 1:  # bcrypt
-        thash = bcrypt.hashpw(password.encode('utf-8'),
-                              user.password.encode('utf-8'))
-        if thash != user.password.encode('utf-8'):
-            return jsonify(msg="Bad username or password"), 401
-    else:
-        return jsonify(msg="Bad user data"), 400
+    if not auth_provider.validate_password(user):
+        return jsonify(msg="Bad username or password"), 401
 
     # Identity can be any data that is json serializable
     access_token = create_access_token(identity=user.uid, fresh=True)
@@ -91,13 +86,8 @@ def fresh_login():
     except User.DoesNotExist:
         return jsonify(msg="Bad username or password"), 401
 
-    if user.crypto == 1:  # bcrypt
-        thash = bcrypt.hashpw(password.encode('utf-8'),
-                              user.password.encode('utf-8'))
-        if thash != user.password.encode('utf-8'):
-            return jsonify(msg="Bad username or password"), 401
-    else:
-        return jsonify(msg="Bad user data"), 400
+    if not auth_provider.validate_password(user):
+        return jsonify(msg="Bad username or password"), 401
 
     new_token = create_access_token(identity=user.uid, fresh=True)
     return jsonify(access_token=new_token)
@@ -177,7 +167,7 @@ def get_post_list(target):
     for post in posts:
         if post['userstatus'] == 10:  # account deleted
             post['user'] = '[Deleted]'
-        post['archived'] = (datetime.datetime.utcnow() - post['posted'].replace(tzinfo=None)) > datetime.timedelta(days=60)
+        post['archived'] = (datetime.datetime.utcnow() - post['posted'].replace(tzinfo=None)) > datetime.timedelta(days=config.site.archive_post_after)
         del post['userstatus']
         del post['uid']
         post['content'] = misc.our_markdown(post['content']) if post['ptype'] != 1 else ''
@@ -222,7 +212,7 @@ def get_post(sub, pid):
     if post['userstatus'] == 10:
         post['user'] = '[Deleted]'
 
-    post['archived'] = (datetime.datetime.utcnow() - post['posted'].replace(tzinfo=None)) > datetime.timedelta(days=60)
+    post['archived'] = (datetime.datetime.utcnow() - post['posted'].replace(tzinfo=None)) > datetime.timedelta(days=config.site.archive_post_after)
     if post['ptype'] == 0:
         post['type'] = 'text'
     elif post['ptype'] == 1:
@@ -262,7 +252,7 @@ def edit_post(sub, pid):
     if misc.is_sub_banned(sub, uid=uid):
         return jsonify(msg='You are banned on this sub.'), 403
 
-    if (datetime.datetime.utcnow() - post.posted.replace(tzinfo=None)) > datetime.timedelta(days=60):
+    if (datetime.datetime.utcnow() - post.posted.replace(tzinfo=None)) > datetime.timedelta(days=config.site.archive_post_after):
         return jsonify(msg='Post is archived'), 403
 
     post.content = content
@@ -296,10 +286,8 @@ def delete_post(sub, pid):
             return jsonify(msg="Cannot delete post without reason"), 400
         post.deleted = 2
         # TODO: Make this a translatable notification
-        misc.create_message(mfrom=uid, to=post.uid.uid,
-                            subject='Your post on /s/' + sub.name + ' has been deleted.',
-                            content='Reason: ' + reason,
-                            link=sub.name, mtype=11)
+        Notification(type='POST_DELETE', sub=post.sid, post=post.pid, content='Reason: ' + reason,
+                     sender=uid, target=post.uid).save()
 
         misc.create_sublog(misc.LOG_TYPE_SUB_DELETE_POST, uid, post.sid,
                            comment=reason, link=url_for('site.view_post_inbox', pid=post.pid),
@@ -397,7 +385,7 @@ def create_comment(sub, pid):
     if post.deleted:
         return jsonify(msg='Post was deleted'), 404
 
-    if (datetime.datetime.utcnow() - post.posted.replace(tzinfo=None)) > datetime.timedelta(days=60):
+    if (datetime.datetime.utcnow() - post.posted.replace(tzinfo=None)) > datetime.timedelta(days=config.site.archive_post_after):
         return jsonify(msg="Post is archived"), 403
 
     try:
@@ -436,19 +424,14 @@ def create_comment(sub, pid):
     if parentcid:
         parent = SubPostComment.get(SubPostComment.cid == parentcid)
         notif_to = parent.uid_id
-        subject = 'Comment reply: ' + post.title
-        mtype = 5
+        ntype = 'COMMENT_REPLY'
     else:
         notif_to = post.uid_id
-        subject = 'Post reply: ' + post.title
-        mtype = 4
+        ntype = 'POST_REPLY'
+
     if notif_to != uid and uid not in misc.get_ignores(notif_to):
-        misc.create_message(mfrom=uid,
-                            to=notif_to,
-                            subject=subject,
-                            content='',
-                            link=comment.cid,
-                            mtype=mtype)
+        Notification(type=ntype, sub=post.sid, post=post.pid, comment=comment.cid,
+                     sender=uid, target=notif_to).save()
         socketio.emit('notification', {'count': misc.get_notification_count(notif_to)},
                       namespace='/snt', room='user' + notif_to)
 
@@ -491,7 +474,7 @@ def edit_comment(sub, pid, cid):
     if comment.uid_id != uid:
         return jsonify(msg="Unauthorized"), 403
 
-    if (datetime.datetime.utcnow() - comment.pid.posted.replace(tzinfo=None)) > datetime.timedelta(days=60):
+    if (datetime.datetime.utcnow() - comment.pid.posted.replace(tzinfo=None)) > datetime.timedelta(days=config.site.archive_post_after):
         return jsonify(msg="Post is archived"), 400
 
     if len(content) > 16384:
@@ -528,7 +511,7 @@ def delete_comment(sub, pid, cid):
     if comment.uid_id != uid:
         return jsonify(msg="Unauthorized"), 403
 
-    if (datetime.datetime.utcnow() - comment.pid.posted.replace(tzinfo=None)) > datetime.timedelta(days=60):
+    if (datetime.datetime.utcnow() - comment.pid.posted.replace(tzinfo=None)) > datetime.timedelta(days=config.site.archive_post_after):
         return jsonify(msg="Post is archived"), 400
 
     comment.status = 1
@@ -764,11 +747,19 @@ def search_sub():
     query = request.args.get('query', '')
     if len(query) < 3 or not misc.allowedNames.match(query):
         return jsonify(results=[])
-    
+
     query = '%' + query + '%'
     subs = Sub.select(Sub.name).where(Sub.name ** query).limit(10).dicts()
 
     return jsonify(results=list(subs))
+
+@API.route('/sub/rules', methods=['GET'])
+def get_sub_rules():
+    pid = request.args.get('pid', '')
+    sub = SubPost.select().where(SubPost.pid == pid).join(Sub).where(Sub.sid == SubPost.sid).dicts().get()
+    rules = list(SubRule.select().where(SubRule.sid == sub['sid']).dicts())
+
+    return jsonify(results=rules)
 
 
 @API.route('/user/settings', methods=['GET'])
@@ -802,10 +793,10 @@ def set_settings():
     settings = request.json.get('settings', None)
     if not settings:
         return jsonify(msg="Missing parameters"), 400
-     
+
     if [x for x in settings.keys() if x not in ['labrat', 'nostyles', 'nsfw', 'nochat']]:
         return jsonify(msg="Invalid setting options sent"), 400
-    
+
     # Apply settings
     qrys = []
     for sett in settings:
@@ -814,8 +805,8 @@ def set_settings():
             if not isinstance(settings[sett], bool):
                 return jsonify(msg="Invalid type for setting"), 400
             value = '1' if value else '0'
-        
-        
+
+
         qrys.append(UserMetadata.update(value=value).where((UserMetadata.key == sett) & (UserMetadata.uid == uid)))
 
     [x.execute() for x in qrys]
